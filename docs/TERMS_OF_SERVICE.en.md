@@ -2,9 +2,11 @@
 
 **English** | [日本語](TERMS_OF_SERVICE.md)
 
-**Last updated: May 7, 2026**
+**Last updated: May 7, 2026** (clarified copyright holder Belleval office; redistribution / attribution / no passing-off)
 
 These Terms of Service (“Terms”) govern your use of the open-source mobile application “Codex Blanche” for Android (package name `com.tamarilog.codexblanche`, the “App”). Please read these Terms before you build or use the App.
+
+**“Operator”** means **Belleval office**, the copyright holder of this App’s source code. The repository may be hosted under the `Tamari-log` organization on GitHub; **Belleval office** remains the stated copyright holder.
 
 ## 1. Scope
 
@@ -36,8 +38,9 @@ You must not:
 
 ## 5. Intellectual property
 
-1. Source code licensing follows the license file(s) and notices in the repository. These Terms do not replace those license terms.  
-2. Rights in content you send to AI Providers and content returned by models are governed by **each AI Provider’s terms and applicable law**.
+1. Source code licensing follows the license file(s) and notices in the repository. These Terms do not replace those license terms. **Belleval office** is the copyright holder.  
+2. Rights in content you send to AI Providers and content returned by models are governed by **each AI Provider’s terms and applicable law**.  
+3. **Redistribution / forks**: In addition to whatever attribution the license (e.g. MIT) requires, you must **preserve reasonable credit to Belleval office and this repository**. You must not conceal the work’s origins or **misrepresent yourself as the sole original author** in public statements, store listings, or branding.
 
 ## 6. Limitation of liability
 

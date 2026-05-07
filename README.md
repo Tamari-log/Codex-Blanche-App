@@ -4,7 +4,8 @@
 
 ## 法務
 
-- **ソースコードのライセンス**: [MIT License](LICENSE)（再配布・改変可。著作権表示と許諾文の維持が条件）
+- **ソースコードのライセンス**: [MIT License](LICENSE)（著作権者: **Belleval office**。再配布・改変可で、著作権表示と許諾文の維持が条件）
+- **再配布について**: MIT の条件に加え、**本ソフトウェアが Belleval office（および本リポジトリ）由来であることが分かるクレジットを残してください**。著作権表示や出典を消して「自作・オリジナル作品のみ」であるかのような主張・表示は行わないでください。
 - [利用規約](docs/TERMS_OF_SERVICE.md)（日本語） / [Terms of Service](docs/TERMS_OF_SERVICE.en.md)（English）
 - [プライバシーポリシー](docs/PRIVACY_POLICY.md)（日本語） / [Privacy Policy](docs/PRIVACY_POLICY.en.md)（English）
 

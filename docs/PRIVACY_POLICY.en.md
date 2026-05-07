@@ -2,13 +2,13 @@
 
 **English** | [日本語](PRIVACY_POLICY.md)
 
-**Last updated: May 7, 2026**
+**Last updated: May 7, 2026** (copyright holder named Belleval office)
 
 This Privacy Policy explains how the “Codex Blanche” Android application (package name `com.tamarilog.codexblanche`, the “App”) handles personal and related data. By using the App, you agree to this Policy.
 
-## 1. Operator
+## 1. Belleval office (copyright holder)
 
-The App is primarily distributed as open-source software via [Tamari-log/Codex-Blanche-App](https://github.com/Tamari-log/Codex-Blanche-App). If you obtain builds from another distributor, review their privacy disclosures as well.
+**Belleval office** is the stated copyright holder of this App’s source code. Distribution and development may be hosted via [Tamari-log/Codex-Blanche-App](https://github.com/Tamari-log/Codex-Blanche-App). If you obtain builds from another distributor, review their privacy disclosures as well.
 
 ## 2. Data handled by the App (overview)
 
@@ -18,7 +18,7 @@ The App processes chat history, settings, API keys (if you enter them), and opti
 
 1. When you send messages, **conversation content**, and text or metadata derived from attachments, may be sent to the AI Provider you select.  
 2. Those providers process data under **their own privacy policies and terms**. Please read their documents before use.  
-3. If you store API keys in the App, they are kept **on your device** for authentication. The Operator typically does not receive your keys.
+3. If you store API keys in the App, they are kept **on your device** for authentication. Belleval office typically does not receive your keys.
 
 ## 4. Google Drive (optional)
 
@@ -44,7 +44,7 @@ The App follows common mobile-development practices, but **no Internet transmiss
 
 ## 9. Changes
 
-We may update this Policy by revising this file in the repository. Continued use after updates may constitute acceptance of the revised Policy where permitted by law.
+Belleval office may update this Policy by revising this file in the repository. Continued use after updates may constitute acceptance of the revised Policy where permitted by law.
 
 ## 10. Contact
 

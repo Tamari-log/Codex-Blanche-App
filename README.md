@@ -4,6 +4,7 @@
 
 ## 法務
 
+- **ソースコードのライセンス**: [MIT License](LICENSE)（再配布・改変可。著作権表示と許諾文の維持が条件）
 - [利用規約](docs/TERMS_OF_SERVICE.md)（日本語） / [Terms of Service](docs/TERMS_OF_SERVICE.en.md)（English）
 - [プライバシーポリシー](docs/PRIVACY_POLICY.md)（日本語） / [Privacy Policy](docs/PRIVACY_POLICY.en.md)（English）
 

@@ -11,6 +11,7 @@ This repository is the **native Android** edition of [Codex Blanche](https://git
 
 ## Legal
 
+- **Source code license**: [MIT License](LICENSE) (permissive; retain copyright and license notice when redistributing)
 - [Terms of Service](docs/TERMS_OF_SERVICE.en.md) (English) · [日本語](docs/TERMS_OF_SERVICE.md)
 - [Privacy Policy](docs/PRIVACY_POLICY.en.md) (English) · [日本語](docs/PRIVACY_POLICY.md)
 

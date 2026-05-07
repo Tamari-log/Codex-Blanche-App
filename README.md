@@ -1,5 +1,14 @@
 # Codex Blanche（Android）
 
+**日本語** | [English](README.en.md)
+
+## 法務
+
+- [利用規約](docs/TERMS_OF_SERVICE.md)（日本語） / [Terms of Service](docs/TERMS_OF_SERVICE.en.md)（English）
+- [プライバシーポリシー](docs/PRIVACY_POLICY.md)（日本語） / [Privacy Policy](docs/PRIVACY_POLICY.en.md)（English）
+
+---
+
 [Codex Blanche](https://github.com/Tamari-log/Codex-Blanche) の **ネイティブ Android 版**です。Web アプリと同様、**Gemini** および **ChatGPT（OpenAI）** の API を使ったチャット体験を、端末上の Compose アプリとして提供します。データ形式や設定の考え方は Web 版に寄せてあり、バックアップのインポート／エクスポートや Google Drive 同期で **Web 版との併用**を想定した構成です。
 
 | | リポジトリ |

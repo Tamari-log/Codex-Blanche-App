@@ -107,14 +107,16 @@ import com.tamarilog.codexblanche.data.model.Persona
 import com.tamarilog.codexblanche.ui.components.ChatPaperBackdrop
 import com.tamarilog.codexblanche.ui.theme.CodexWebPalette
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlin.coroutines.coroutineContext
 import kotlin.math.abs
 
 @Composable
@@ -145,7 +147,7 @@ fun ChatScreen(
     }
     /** プログラムスクロール同士の競合・キャンセルによる中途半端な scrollToItem を防ぐ */
     val programScrollMutex = remember { Mutex() }
-    var userTailScrollJob by remember { mutableStateOf<Job?>(null) }
+    val userTailScroll = remember { UserTailScrollSlot() }
     val programmaticScrollDepth = remember { mutableIntStateOf(0) }
 
     suspend fun withProgrammaticScroll(block: suspend () -> Unit) {
@@ -208,12 +210,15 @@ fun ChatScreen(
 
     val session = ui.activeSession()
     val messages = session?.messages.orEmpty()
-    /** ユーザーが履歴を読むために上へスクロールしたら false。末尾へ戻したら true（会話切替でリセット）。 */
+    /** 追従フラグ: 会話切替・送信・↓ボタンで true。指でリストを動かすと false（末尾へ戻しても自動では true に戻さない）。 */
     var followStreamTail by remember(session?.id) { mutableStateOf(true) }
 
     val listBottomPadding = 8.dp
 
-    val cancelFollowOnUserScroll = rememberUpdatedState { followStreamTail = false }
+    val cancelFollowOnUserScroll = rememberUpdatedState {
+        followStreamTail = false
+        userTailScroll.cancel()
+    }
     val userDragNestedScroll = remember {
         object : NestedScrollConnection {
             override fun onPostScroll(
@@ -233,7 +238,7 @@ fun ChatScreen(
         }
     }
 
-    /** 末尾から離れた／戻ったを見て追従フラグを更新（プログラムスクロール中は無視） */
+    /** 指で一覧を動かしたら追従オフのみ（末尾に戻したから true に戻す自動判定はしない。フリック終了の一瞬で誤復帰するため） */
     LaunchedEffect(session?.id) {
         var prevNearBottom = true
         var prevNewestVisible = true
@@ -254,12 +259,8 @@ fun ChatScreen(
             if (prog == 0) {
                 if (streamingOn) {
                     if (prevNewestVisible && !newestVisible) followStreamTail = false
-                    if (!prevNewestVisible && newestVisible && nearBottom) followStreamTail = true
                 } else {
-                    when {
-                        prevNearBottom && !nearBottom -> followStreamTail = false
-                        !prevNearBottom && nearBottom -> followStreamTail = true
-                    }
+                    if (prevNearBottom && !nearBottom) followStreamTail = false
                 }
             }
             prevNearBottom = nearBottom
@@ -289,8 +290,7 @@ fun ChatScreen(
         var wasStreaming = false
         snapshotFlow { ui.streamingAssistant != null }.collect { streamingOn ->
             if (wasStreaming && !streamingOn) {
-                userTailScrollJob?.cancel()
-                userTailScrollJob = null
+                userTailScroll.cancel()
             }
             wasStreaming = streamingOn
         }
@@ -299,8 +299,7 @@ fun ChatScreen(
     /** ユーザー投稿が末尾に増えたときだけ（AI 応答確定後は sending=false かつ streaming=null のため別経路） */
     LaunchedEffect(session?.id) {
         if (session?.id == null) return@LaunchedEffect
-        userTailScrollJob?.cancel()
-        userTailScrollJob = null
+        userTailScroll.cancel()
         var lastCount = -1
         snapshotFlow {
             Triple(
@@ -321,12 +320,13 @@ fun ChatScreen(
                 ui.streamingAssistant != null
             ) {
                 followStreamTail = true
-                userTailScrollJob?.cancel()
-                userTailScrollJob = scope.launch {
-                    withProgrammaticScroll {
-                        listState.scrollToTailAfterUserMessage(persistedMessageCount = c)
-                    }
-                }
+                userTailScroll.replace(
+                    scope.launch {
+                        withProgrammaticScroll {
+                            listState.scrollToTailAfterUserMessage(persistedMessageCount = c)
+                        }
+                    },
+                )
             }
             lastCount = c
         }
@@ -1733,6 +1733,21 @@ private fun PersonaTabPill(
     }
 }
 
+private class UserTailScrollSlot {
+    var job: Job? = null
+        private set
+
+    fun replace(new: Job?) {
+        job?.cancel()
+        job = new
+    }
+
+    fun cancel() {
+        job?.cancel()
+        job = null
+    }
+}
+
 /** 会話一覧の「末尾レイアウト行が見えている」か */
 private fun LazyListState.isNewestRowVisible(): Boolean {
     val lastIndex = layoutInfo.totalItemsCount - 1
@@ -1756,28 +1771,20 @@ private fun LazyListState.isNearConversationBottom(): Boolean {
 }
 
 /**
- * ユーザー送信直後は LazyColumn の行数がまだ古いままのフレームがあり、
- * 一つ前の AI 行で止まることがある。件数が c+1（確定 c 件＋ストリーム行または確定済み AI 1 行）に達してから末尾へ寄せる。
- * 期待件数未満のときにフォールバックで scroll すると最終行がユーザーのみになり「入力に戻る」挙動になるため、条件を満たさない場合は何もしない。
+ * ユーザー送信直後、確定メッセージ件数＋ストリーム行ぶんの Lazy 行が揃ってから末尾へ1回だけ寄せる。
+ * ループで何度も scroll しない（ユーザー行に張り付いたような見え方の抑制とキャンセル反映のため）。
  */
 private suspend fun LazyListState.scrollToTailAfterUserMessage(
     persistedMessageCount: Int,
 ) {
     val minLazyItemCount = persistedMessageCount + 1
     repeat(40) {
+        coroutineContext.ensureActive()
         if (layoutInfo.totalItemsCount >= minLazyItemCount) {
-            scrollLastItemToBottomEdge()
-            withFrameNanos { }
-            withFrameNanos { }
             scrollLastItemToBottomEdge()
             return
         }
         withFrameNanos { }
-    }
-    if (layoutInfo.totalItemsCount >= minLazyItemCount) {
-        scrollLastItemToBottomEdge()
-        withFrameNanos { }
-        scrollLastItemToBottomEdge()
     }
 }
 
@@ -1788,6 +1795,7 @@ private suspend fun LazyListState.scrollToTailAfterUserMessage(
  */
 private suspend fun LazyListState.scrollLastItemToBottomEdge() {
     repeat(24) {
+        coroutineContext.ensureActive()
         val info = layoutInfo
         val count = info.totalItemsCount
         if (count <= 0) return
@@ -1811,6 +1819,7 @@ private suspend fun LazyListState.scrollLastItemToBottomEdge() {
         }
     }
     repeat(24) {
+        coroutineContext.ensureActive()
         if (!canScrollForward) return
         scroll { scrollBy(8f) }
         delay(4)

@@ -73,15 +73,10 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.withFrameNanos
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
-import androidx.compose.ui.input.nestedscroll.NestedScrollSource
-import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -90,6 +85,7 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontWeight
@@ -117,7 +113,6 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlin.coroutines.coroutineContext
-import kotlin.math.abs
 
 @Composable
 fun ChatScreen(
@@ -210,90 +205,8 @@ fun ChatScreen(
 
     val session = ui.activeSession()
     val messages = session?.messages.orEmpty()
-    /** 追従フラグ: 送信・↓・末尾でスクロール静止で true。指で動かすと false。 */
-    var followStreamTail by remember(session?.id) { mutableStateOf(true) }
 
     val listBottomPadding = 8.dp
-
-    val cancelFollowOnUserScroll = rememberUpdatedState {
-        followStreamTail = false
-        userTailScroll.cancel()
-    }
-    val userDragNestedScroll = remember {
-        object : NestedScrollConnection {
-            override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
-                if (programmaticScrollDepth.intValue > 0) return Offset.Zero
-                val userLike = when (source) {
-                    NestedScrollSource.Drag, NestedScrollSource.Fling, NestedScrollSource.Wheel -> true
-                    else -> false
-                }
-                if (userLike && abs(available.y) > 0.5f) {
-                    cancelFollowOnUserScroll.value.invoke()
-                }
-                return Offset.Zero
-            }
-
-            override fun onPostScroll(
-                consumed: Offset,
-                available: Offset,
-                source: NestedScrollSource,
-            ): Offset {
-                if (programmaticScrollDepth.intValue > 0) return Offset.Zero
-                val userLike = when (source) {
-                    NestedScrollSource.Drag, NestedScrollSource.Fling, NestedScrollSource.Wheel -> true
-                    else -> false
-                }
-                if (userLike && abs(consumed.y) > 0.5f) {
-                    cancelFollowOnUserScroll.value.invoke()
-                }
-                return Offset.Zero
-            }
-        }
-    }
-
-    /**
-     * ドラッグ／慣性が止まってから少し待ち、まだこれ以上下にスクロールできなければ末尾到達とみなして追従オン。
-     * 上を読んで止めた地点では canScrollForward が true のままなので勝手に追従は付かない。
-     */
-    LaunchedEffect(listState, session?.id) {
-        snapshotFlow { listState.isScrollInProgress }.collectLatest { inProgress ->
-            if (inProgress) return@collectLatest
-            delay(160)
-            if (programmaticScrollDepth.intValue != 0) return@collectLatest
-            if (!listState.canScrollForward) {
-                followStreamTail = true
-            }
-        }
-    }
-    /** レイアウトだけでは分からない「古い方へ読む」位置での追従オフ補助（メインは nestedScroll） */
-    LaunchedEffect(session?.id) {
-        var prevNearBottom = true
-        var prevNewestVisible = true
-        snapshotFlow {
-            listState.layoutInfo
-            listOf(
-                listState.firstVisibleItemIndex,
-                listState.firstVisibleItemScrollOffset,
-                listState.layoutInfo.totalItemsCount,
-                programmaticScrollDepth.intValue,
-                if (ui.streamingAssistant != null) 1 else 0,
-            )
-        }.collect { v ->
-            val prog = v[3]
-            val streamingOn = v[4] != 0
-            val nearBottom = listState.isNearConversationBottom()
-            val newestVisible = listState.isNewestRowVisible()
-            if (prog == 0) {
-                if (streamingOn) {
-                    if (prevNewestVisible && !newestVisible) followStreamTail = false
-                } else {
-                    if (prevNearBottom && !nearBottom) followStreamTail = false
-                }
-            }
-            prevNearBottom = nearBottom
-            prevNewestVisible = newestVisible
-        }
-    }
 
     /** 起動直後・会話切替後のみ末尾へ（loading のたびに再実行しない） */
     LaunchedEffect(session?.id) {
@@ -346,7 +259,6 @@ fun ChatScreen(
                 sending &&
                 ui.streamingAssistant != null
             ) {
-                followStreamTail = true
                 userTailScroll.replace(
                     scope.launch {
                         withProgrammaticScroll {
@@ -359,11 +271,16 @@ fun ChatScreen(
         }
     }
 
+    val streamAiBodyTopInsetPx = with(LocalDensity.current) {
+        // StreamingAiBubble: ラベル1行（bodySmall.fontSize 基準の行高）+ padding(bottom=6.dp) の直後が本文
+        MaterialTheme.typography.bodySmall.fontSize.toPx() * 1.25f + 6.dp.toPx()
+    }
+
     /**
-     * ストリーム中のチャンクごとに末尾へ追従。followStreamTail が true のときだけ。
-     * [collectLatest] で直近のみ実行し古い scroll を捨てる。
+     * ストリーム追従: ビューポート下端が「本文上端 + [StreamTailAutoFollowBandPx] px」より下にあり、
+     * かつこれ以上下にスクロールできない（末尾に張り付き）ときだけ下寄せ。
      */
-    LaunchedEffect(Unit) {
+    LaunchedEffect(streamAiBodyTopInsetPx) {
         snapshotFlow {
             listState.isScrollInProgress
             val sess = ui.activeSession()
@@ -372,15 +289,11 @@ fun ChatScreen(
                 msgCount,
                 ui.streamingAssistant?.length ?: -1,
                 ui.streamingAssistant != null,
-            ) to followStreamTail
-        }.collectLatest { (triple, pinning) ->
-            val (msgSize, _, streaming) = triple
+            )
+        }.collectLatest { (_, _, streaming) ->
             if (!streaming) return@collectLatest
-            if (!pinning) return@collectLatest
             if (listState.isScrollInProgress) return@collectLatest
-            val extra = 1
-            val last = msgSize + extra - 1
-            if (last < 0) return@collectLatest
+            if (!listState.isStreamTailPinnedForAutoFollow(streamAiBodyTopInsetPx)) return@collectLatest
             withProgrammaticScroll {
                 listState.scrollLastItemToBottomEdge()
             }
@@ -628,7 +541,6 @@ fun ChatScreen(
                                         withProgrammaticScroll {
                                             listState.scrollToItem(0)
                                         }
-                                        followStreamTail = false
                                     }
                                 },
                         )
@@ -686,9 +598,7 @@ fun ChatScreen(
                         ChatPaperBackdrop(isDark = isDark, baseColor = chatBg) {
                             LazyColumn(
                                 state = listState,
-                                modifier = Modifier
-                                    .fillMaxSize()
-                                    .nestedScroll(userDragNestedScroll),
+                                modifier = Modifier.fillMaxSize(),
                                 contentPadding = PaddingValues(
                                     start = 16.dp,
                                     end = 16.dp,
@@ -746,7 +656,6 @@ fun ChatScreen(
                             Button(
                                 onClick = {
                                     scope.launch {
-                                        followStreamTail = true
                                         withProgrammaticScroll {
                                             listState.scrollLastItemToBottomEdge()
                                         }
@@ -1777,26 +1686,26 @@ private class UserTailScrollSlot {
     }
 }
 
-/** 会話一覧の「末尾レイアウト行が見えている」か */
-private fun LazyListState.isNewestRowVisible(): Boolean {
-    val lastIndex = layoutInfo.totalItemsCount - 1
-    if (lastIndex < 0) return true
-    val vis = layoutInfo.visibleItemsInfo
-    return vis.isNotEmpty() && vis.last().index >= lastIndex
-}
+/** ストリーム追従の許容幅（px）。本文上端からの基準線＋下端寄せの両方に使う。 */
+private const val StreamTailAutoFollowBandPx = 10f
 
-/** 会話一覧の「末尾にいる」か（追従 ON の判定用）。 */
-private fun LazyListState.isNearConversationBottom(): Boolean {
+/**
+ * ストリーミング行は [StreamingAiBubble] と同じくラベル下が本文上端。[messageBodyTopInsetPx] は Lazy 行先頭から本文先頭までの px。
+ * Lazy 行の下端からの 10px ではなく、本文上端 [bandPx] px より下にビューポート下端があり、かつ一覧末尾に張り付いているときだけ追従。
+ */
+private fun LazyListState.isStreamTailPinnedForAutoFollow(
+    messageBodyTopInsetPx: Float,
+    bandPx: Float = StreamTailAutoFollowBandPx,
+): Boolean {
     val info = layoutInfo
     val lastIndex = info.totalItemsCount - 1
     if (lastIndex < 0) return true
-    if (!canScrollForward) return true
-    val vis = info.visibleItemsInfo
-    if (vis.isEmpty()) return true
-    if (vis.last().index < lastIndex) return false
-    val lastItem = vis.find { it.index == lastIndex } ?: return true
-    val distancePastBottom = lastItem.offset + lastItem.size - info.viewportEndOffset
-    return distancePastBottom <= 36
+    val lastItem = info.visibleItemsInfo.find { it.index == lastIndex } ?: return false
+    val bodyTop = lastItem.offset + messageBodyTopInsetPx
+    val thresholdY = bodyTop + bandPx
+    if (info.viewportEndOffset < thresholdY) return false
+    if (canScrollForward) return false
+    return true
 }
 
 /**

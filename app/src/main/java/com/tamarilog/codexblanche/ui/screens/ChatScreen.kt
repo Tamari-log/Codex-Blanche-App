@@ -30,6 +30,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.navigationBarsPadding
@@ -40,6 +41,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
@@ -68,6 +70,7 @@ import androidx.compose.material3.TextField
 import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -106,7 +109,10 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
-import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.conflate
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -143,6 +149,8 @@ fun ChatScreen(
     /** プログラムスクロール同士の競合・キャンセルによる中途半端な scrollToItem を防ぐ */
     val programScrollMutex = remember { Mutex() }
     val userTailScroll = remember { UserTailScrollSlot() }
+    /** AI 応答終了・会話切替で進めると送信用末尾スクロール Job を論理無効化する */
+    val userTailScrollEpoch = remember { mutableIntStateOf(0) }
     val programmaticScrollDepth = remember { mutableIntStateOf(0) }
 
     suspend fun withProgrammaticScroll(block: suspend () -> Unit) {
@@ -208,6 +216,20 @@ fun ChatScreen(
 
     val listBottomPadding = 8.dp
 
+    val density = LocalDensity.current
+    /** キーボード開閉でリスト領域の縦サイズが変わる。Composable コンテキストでしか読めない。 */
+    val imeBottomPx = WindowInsets.ime.getBottom(density)
+    /** Composable で読んだ IME を Hot Flow へ（snapshotFlow 内では WindowInsets を読めない） */
+    val imeBottomPxFlow = remember { MutableStateFlow(0) }
+    /** 同一フレームで collect 側に IME を先に反映（LaunchedEffect より早い） */
+    SideEffect {
+        imeBottomPxFlow.value = imeBottomPx
+    }
+    /** ストリーム追従・終了時の再セッティングで共通（bodyLarge px + 10） */
+    val streamAiTailFollowMaxGapPx = with(density) {
+        MaterialTheme.typography.bodyLarge.fontSize.toPx() + 10f
+    }
+
     /** 起動直後・会話切替後のみ末尾へ（loading のたびに再実行しない） */
     LaunchedEffect(session?.id) {
         val sid = session?.id ?: return@LaunchedEffect
@@ -224,13 +246,31 @@ fun ChatScreen(
     }
 
     /**
-     * AI 確定で送信用末尾スクロール Job だけキャンセル（確定後の強制スクロールはジャンプの原因になるため行わない）。
+     * AI 応答終了時:
+     * - 送信用末尾寄せ Job 取消し + epoch で [scrollToTailAfterUserMessage] も打ち切り
+     * - ストリーム行削除で高さが縮みオフセット維持でズレる対策は、**確定 AI 行が末尾にあるときだけ** 1 回下端へ寄せる。
+     *   （エラー・キャンセル・キー未設定などで末尾が user のままのときに scroll すると、意図せずユーザ吹き出しへ張り付く）
      */
-    LaunchedEffect(Unit) {
+    LaunchedEffect(streamAiTailFollowMaxGapPx) {
         var wasStreaming = false
         snapshotFlow { ui.streamingAssistant != null }.collect { streamingOn ->
             if (wasStreaming && !streamingOn) {
                 userTailScroll.cancel()
+                userTailScrollEpoch.intValue++
+                val tailIsAiRow =
+                    ui.activeSession()?.messages?.lastOrNull()?.role == "ai"
+                if (tailIsAiRow) {
+                    scope.launch {
+                        delay(32)
+                        if (ui.activeSession()?.messages?.lastOrNull()?.role != "ai") return@launch
+                        val lastIdx = listState.layoutInfo.totalItemsCount - 1
+                        if (lastIdx < 0) return@launch
+                        if (lastIdx - listState.firstVisibleItemIndex > 12) return@launch
+                        withProgrammaticScroll {
+                            listState.scrollLastItemToBottomEdge()
+                        }
+                    }
+                }
             }
             wasStreaming = streamingOn
         }
@@ -240,6 +280,7 @@ fun ChatScreen(
     LaunchedEffect(session?.id) {
         if (session?.id == null) return@LaunchedEffect
         userTailScroll.cancel()
+        userTailScrollEpoch.intValue++
         var lastCount = -1
         snapshotFlow {
             Triple(
@@ -259,10 +300,17 @@ fun ChatScreen(
                 sending &&
                 ui.streamingAssistant != null
             ) {
+                val ticket = userTailScrollEpoch.intValue
                 userTailScroll.replace(
                     scope.launch {
                         withProgrammaticScroll {
-                            listState.scrollToTailAfterUserMessage(persistedMessageCount = c)
+                            listState.scrollToTailAfterUserMessage(
+                                persistedMessageCount = c,
+                                shouldContinue = {
+                                    userTailScrollEpoch.intValue == ticket &&
+                                        vm.uiState.value.streamingAssistant != null
+                                },
+                            )
                         }
                     },
                 )
@@ -271,33 +319,33 @@ fun ChatScreen(
         }
     }
 
-    val streamAiBodyTopInsetPx = with(LocalDensity.current) {
-        // StreamingAiBubble: ラベル1行（bodySmall.fontSize 基準の行高）+ padding(bottom=6.dp) の直後が本文
-        MaterialTheme.typography.bodySmall.fontSize.toPx() * 1.25f + 6.dp.toPx()
-    }
-
     /**
-     * ストリーム追従: ビューポート下端が「本文上端 + [StreamTailAutoFollowBandPx] px」より下にあり、
-     * かつこれ以上下にスクロールできない（末尾に張り付き）ときだけ下寄せ。
+     * ストリーム追従: [snapshotFlow]（一覧レイアウト＋ストリーム内容）と [imeBottomPxFlow]（[SideEffect] で同期した IME 下端 px）を [combine]。
+     * IME 中は ime > 0 のため判定・スクロールしない。閉じると Flow が更新され同一パイプラインで再評価される。
      */
-    LaunchedEffect(streamAiBodyTopInsetPx) {
-        snapshotFlow {
+    LaunchedEffect(streamAiTailFollowMaxGapPx, density) {
+        val layoutFlow = snapshotFlow {
+            listState.layoutInfo
             listState.isScrollInProgress
             val sess = ui.activeSession()
-            val msgCount = sess?.messages?.size ?: 0
             Triple(
-                msgCount,
+                sess?.messages?.size ?: 0,
                 ui.streamingAssistant?.length ?: -1,
                 ui.streamingAssistant != null,
             )
-        }.collectLatest { (_, _, streaming) ->
-            if (!streaming) return@collectLatest
-            if (listState.isScrollInProgress) return@collectLatest
-            if (!listState.isStreamTailPinnedForAutoFollow(streamAiBodyTopInsetPx)) return@collectLatest
-            withProgrammaticScroll {
-                listState.scrollLastItemToBottomEdge()
-            }
         }
+        combine(layoutFlow, imeBottomPxFlow) { triple, imeBottom ->
+            triple to imeBottom
+        }
+            .conflate()
+            .collect { (triple, imeBottom) ->
+                if (!triple.third) return@collect
+                if (imeBottom > 0) return@collect
+                if (!listState.isStreamTailPinnedForAutoFollow(streamAiTailFollowMaxGapPx)) return@collect
+                withProgrammaticScroll {
+                    listState.scrollLastItemToBottomEdge()
+                }
+            }
     }
 
     /** プリセットパネル表示中は入力欄のキーボードを閉じる */
@@ -1686,26 +1734,19 @@ private class UserTailScrollSlot {
     }
 }
 
-/** ストリーム追従の許容幅（px）。本文上端からの基準線＋下端寄せの両方に使う。 */
-private const val StreamTailAutoFollowBandPx = 10f
-
 /**
- * ストリーミング行は [StreamingAiBubble] と同じくラベル下が本文上端。[messageBodyTopInsetPx] は Lazy 行先頭から本文先頭までの px。
- * Lazy 行の下端からの 10px ではなく、本文上端 [bandPx] px より下にビューポート下端があり、かつ一覧末尾に張り付いているときだけ追従。
+ * 最終 Lazy 行の下端とビューポート下端の差（[scrollLastItemToBottomEdge] と同じ）が
+ * [maxGapFromBottomPx] 以下なら、末尾からその距離内にいるとみなしてストリーム追従する。
  */
 private fun LazyListState.isStreamTailPinnedForAutoFollow(
-    messageBodyTopInsetPx: Float,
-    bandPx: Float = StreamTailAutoFollowBandPx,
+    maxGapFromBottomPx: Float,
 ): Boolean {
     val info = layoutInfo
     val lastIndex = info.totalItemsCount - 1
     if (lastIndex < 0) return true
     val lastItem = info.visibleItemsInfo.find { it.index == lastIndex } ?: return false
-    val bodyTop = lastItem.offset + messageBodyTopInsetPx
-    val thresholdY = bodyTop + bandPx
-    if (info.viewportEndOffset < thresholdY) return false
-    if (canScrollForward) return false
-    return true
+    val bottomGap = lastItem.offset + lastItem.size - info.viewportEndOffset
+    return bottomGap.toFloat() <= maxGapFromBottomPx
 }
 
 /**
@@ -1714,12 +1755,15 @@ private fun LazyListState.isStreamTailPinnedForAutoFollow(
  */
 private suspend fun LazyListState.scrollToTailAfterUserMessage(
     persistedMessageCount: Int,
+    shouldContinue: () -> Boolean = { true },
 ) {
     val minLazyItemCount = persistedMessageCount + 1
     repeat(40) {
         coroutineContext.ensureActive()
+        if (!shouldContinue()) return
         if (layoutInfo.totalItemsCount >= minLazyItemCount) {
-            scrollLastItemToBottomEdge()
+            if (!shouldContinue()) return
+            scrollLastItemToBottomEdge(shouldContinue)
             return
         }
         withFrameNanos { }
@@ -1731,9 +1775,12 @@ private suspend fun LazyListState.scrollToTailAfterUserMessage(
  * まずは [scroll] のみで下端に寄せ、最終行がまだ可視範囲にないときだけ [scrollToItem]。
  * 計測の丸めで数 px 残ることがあるので、最後に [canScrollForward] が false になるまで微調整する。
  */
-private suspend fun LazyListState.scrollLastItemToBottomEdge() {
+private suspend fun LazyListState.scrollLastItemToBottomEdge(
+    shouldContinue: () -> Boolean = { true },
+) {
     repeat(24) {
         coroutineContext.ensureActive()
+        if (!shouldContinue()) return
         val info = layoutInfo
         val count = info.totalItemsCount
         if (count <= 0) return
@@ -1746,21 +1793,28 @@ private suspend fun LazyListState.scrollLastItemToBottomEdge() {
                 gap > 0f -> scroll { scrollBy(gap.coerceAtLeast(2f)) }
             }
             delay(8)
+            if (!shouldContinue()) return
             if (!canScrollForward) return
         } else {
             val maxVis = info.visibleItemsInfo.maxOfOrNull { it.index } ?: -1
             when {
-                maxVis < lastIndex -> scrollToItem(lastIndex)
+                maxVis < lastIndex -> {
+                    if (!shouldContinue()) return
+                    scrollToItem(lastIndex)
+                }
                 else -> scroll { scrollBy(96f) }
             }
             delay(12)
+            if (!shouldContinue()) return
         }
     }
     repeat(24) {
         coroutineContext.ensureActive()
+        if (!shouldContinue()) return
         if (!canScrollForward) return
         scroll { scrollBy(8f) }
         delay(4)
+        if (!shouldContinue()) return
     }
 }
 

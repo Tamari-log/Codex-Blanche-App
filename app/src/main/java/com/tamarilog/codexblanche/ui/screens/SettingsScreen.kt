@@ -304,6 +304,7 @@ fun SettingsScreen(
                     isDark = isDark,
                     draft = draft,
                     onDraft = { draft = it },
+                    onPersistDraft = { vm.updateSettings(it) },
                     driveStatus = ui.driveStatus,
                     onCopyGcpAndroidOAuth = {
                         val sha = AppInstallerDigest.sha1ColonUpper(context) ?: "（取得失敗）"
@@ -486,6 +487,7 @@ private fun SettingsAccount(
     isDark: Boolean,
     draft: AppSettings,
     onDraft: (AppSettings) -> Unit,
+    onPersistDraft: (AppSettings) -> Unit,
     driveStatus: String,
     onCopyGcpAndroidOAuth: () -> Unit,
     onGoogleConnect: () -> Unit,
@@ -570,7 +572,11 @@ private fun SettingsAccount(
     Row(verticalAlignment = Alignment.CenterVertically) {
         Checkbox(
             checked = draft.rememberGoogleLogin,
-            onCheckedChange = { onDraft(draft.copy(rememberGoogleLogin = it)) },
+            onCheckedChange = { checked ->
+                val next = draft.copy(rememberGoogleLogin = checked)
+                onDraft(next)
+                onPersistDraft(next)
+            },
         )
         Text(
             "この端末でログインしたままにする",

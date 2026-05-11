@@ -104,6 +104,36 @@ class ChatViewModel(
             var snap = repo.loadSnapshot()
             snap = repo.ensureActiveSession(snap)
             _ui.value = ChatUiState(snapshot = snap, loading = false)
+            restoreGoogleDriveIfRemembered(snap.settings)
+        }
+    }
+
+    /**
+     * 「この端末でログインしたままにする」が有効なとき、プロセス再起動後も Drive を再接続する。
+     * Google Play サービスに残ったアカウントと Drive スコープ許可があればアクティビティなしで接続できる。
+     */
+    private fun restoreGoogleDriveIfRemembered(settings: AppSettings) {
+        if (!settings.rememberGoogleLogin) return
+        val account = GoogleSignIn.getLastSignedInAccount(appContext) ?: return
+        val driveScope = Scope(DriveScopes.DRIVE_FILE)
+        if (!GoogleSignIn.hasPermissions(account, driveScope)) return
+        viewModelScope.launch {
+            try {
+                log("INFO", "Google Drive セッション復元（ログイン維持）")
+                drive.connect(account, appContext)
+                drive.ensureFolderAndFile(
+                    settings.driveFolderName,
+                    settings.driveFileName,
+                )
+                _ui.update { it.copy(driveSignedIn = true, driveStatus = "Drive: 接続済み") }
+            } catch (e: Exception) {
+                _ui.update {
+                    it.copy(
+                        driveSignedIn = false,
+                        driveStatus = "Drive: 再接続できません（${e.message}）",
+                    )
+                }
+            }
         }
     }
 
@@ -138,9 +168,13 @@ class ChatViewModel(
 
     fun updateSettings(newSettings: AppSettings) {
         viewModelScope.launch {
+            val prev = _ui.value.snapshot.settings
             val snap = _ui.value.snapshot.copy(settings = newSettings)
             repo.saveSnapshot(snap)
             _ui.update { it.copy(snapshot = snap) }
+            if (prev.rememberGoogleLogin && !newSettings.rememberGoogleLogin) {
+                googleSignOut()
+            }
         }
     }
 

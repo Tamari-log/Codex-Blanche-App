@@ -212,16 +212,26 @@ fun ChatScreen(
     /** AI 確定で送信用末尾スクロール Job が残っているときだけキャンセル（スクロールはしない） */
     LaunchedEffect(Unit) {
         var wasStreaming = false
-        snapshotFlow { ui.streamingAssistant != null }.collect { streamingOn ->
+        snapshotFlow { (ui.streamingAssistant != null) to ui.sending }.collect { (streamingOn, sending) ->
             if (wasStreaming && !streamingOn) {
                 userTailScrollJob?.cancel()
                 userTailScrollJob = null
+                // ストリーム行の削除直後に LazyColumn がスクロール位置を戻しがちなので、
+                // 確定した AI メッセージの末尾へ寄せ直す（送信テキスト欄へ引き戻さない）
+                if (!sending) {
+                    scope.launch {
+                        programScrollMutex.withLock {
+                            delay(48)
+                            listState.scrollLastItemToBottomEdge()
+                        }
+                    }
+                }
             }
             wasStreaming = streamingOn
         }
     }
 
-    /** ユーザー投稿が末尾に増えたときだけ（送信中＝いまのターンのユーザー発話のみ。AI 確定後は sending=false のため動かない） */
+    /** ユーザー投稿が末尾に増えたときだけ（AI 応答確定後は sending=false かつ streaming=null のため別経路） */
     LaunchedEffect(session?.id) {
         if (session?.id == null) return@LaunchedEffect
         userTailScrollJob?.cancel()
@@ -239,7 +249,12 @@ fun ChatScreen(
                 lastCount = c
                 return@collect
             }
-            if (lastCount >= 0 && c == lastCount + 1 && role == "user" && sending) {
+            if (lastCount >= 0 &&
+                c == lastCount + 1 &&
+                role == "user" &&
+                sending &&
+                ui.streamingAssistant != null
+            ) {
                 userTailScrollJob?.cancel()
                 userTailScrollJob = scope.launch {
                     programScrollMutex.withLock {
@@ -272,6 +287,14 @@ fun ChatScreen(
             programScrollMutex.withLock {
                 listState.scrollLastItemToBottomEdge()
             }
+        }
+    }
+
+    /** プリセットパネル表示中は入力欄のキーボードを閉じる */
+    LaunchedEffect(ui.presetPanelOpen) {
+        if (ui.presetPanelOpen) {
+            keyboard?.hide()
+            focusManager.clearFocus(force = true)
         }
     }
 

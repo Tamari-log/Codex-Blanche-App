@@ -209,16 +209,27 @@ fun ChatScreen(
         }
     }
 
-    /** AI 確定で送信用末尾スクロール Job が残っているときだけキャンセル（スクロールはしない） */
+    /**
+     * AI 確定で送信用末尾スクロール Job をキャンセル。
+     * ストリーム中に末尾付近にいたときだけ、確定後に末尾へ寄せ直す（履歴を読んでいるときは動かさない）。
+     */
     LaunchedEffect(Unit) {
         var wasStreaming = false
-        snapshotFlow { (ui.streamingAssistant != null) to ui.sending }.collect { (streamingOn, sending) ->
+        var atBottomWhileStreaming = true
+        snapshotFlow {
+            Triple(
+                ui.streamingAssistant != null,
+                ui.sending,
+                listState.shouldAutoScrollToBottom(streamingActive = true),
+            )
+        }.collect { (streamingOn, sending, pinToBottom) ->
+            if (streamingOn) {
+                atBottomWhileStreaming = pinToBottom
+            }
             if (wasStreaming && !streamingOn) {
                 userTailScrollJob?.cancel()
                 userTailScrollJob = null
-                // ストリーム行の削除直後に LazyColumn がスクロール位置を戻しがちなので、
-                // 確定した AI メッセージの末尾へ寄せ直す（送信テキスト欄へ引き戻さない）
-                if (!sending) {
+                if (!sending && atBottomWhileStreaming) {
                     scope.launch {
                         programScrollMutex.withLock {
                             delay(48)

@@ -131,20 +131,13 @@ fun SessionAiConfigDialog(
                     onPick = { thinking = it; thinkMenu = false },
                 )
                 OutlinedTextField(
-                    value = userSignature,
-                    onValueChange = { userSignature = it },
-                    label = { Text("署名 (任意)") },
+                    value = systemPrompt,
+                    onValueChange = { systemPrompt = it },
+                    label = { Text("システムプロンプト (任意)") },
                     modifier = Modifier.fillMaxWidth(),
+                    minLines = 4,
                     shape = RoundedCornerShape(8.dp),
                 )
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Checkbox(allowGemini, onCheckedChange = { allowGemini = it })
-                    Text("Gemini の検索を許可", style = MaterialTheme.typography.bodySmall)
-                }
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Checkbox(allowOpenai, onCheckedChange = { allowOpenai = it })
-                    Text("OpenAI の検索を許可", style = MaterialTheme.typography.bodySmall)
-                }
                 Text("温度 ${"%.1f".format(temperature)}", style = MaterialTheme.typography.bodySmall)
                 Slider(
                     value = temperature.toFloat().coerceIn(0f, 2f),
@@ -161,12 +154,19 @@ fun SessionAiConfigDialog(
                     valueRange = 256f..maxCap.toFloat(),
                     steps = tokenSliderSteps(maxCap),
                 )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Checkbox(allowGemini, onCheckedChange = { allowGemini = it })
+                    Text("Gemini の検索を許可", style = MaterialTheme.typography.bodySmall)
+                }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Checkbox(allowOpenai, onCheckedChange = { allowOpenai = it })
+                    Text("OpenAI の検索を許可", style = MaterialTheme.typography.bodySmall)
+                }
                 OutlinedTextField(
-                    value = systemPrompt,
-                    onValueChange = { systemPrompt = it },
-                    label = { Text("システムプロンプト (任意)") },
+                    value = userSignature,
+                    onValueChange = { userSignature = it },
+                    label = { Text("署名 (任意)") },
                     modifier = Modifier.fillMaxWidth(),
-                    minLines = 4,
                     shape = RoundedCornerShape(8.dp),
                 )
             }

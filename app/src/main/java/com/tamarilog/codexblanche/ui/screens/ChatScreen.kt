@@ -210,7 +210,7 @@ fun ChatScreen(
 
     val session = ui.activeSession()
     val messages = session?.messages.orEmpty()
-    /** 追従フラグ: 会話切替・送信・↓ボタンで true。指でリストを動かすと false（末尾へ戻しても自動では true に戻さない）。 */
+    /** 追従フラグ: 送信・↓・末尾でスクロール静止で true。指で動かすと false。 */
     var followStreamTail by remember(session?.id) { mutableStateOf(true) }
 
     val listBottomPadding = 8.dp
@@ -221,11 +221,24 @@ fun ChatScreen(
     }
     val userDragNestedScroll = remember {
         object : NestedScrollConnection {
+            override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
+                if (programmaticScrollDepth.intValue > 0) return Offset.Zero
+                val userLike = when (source) {
+                    NestedScrollSource.Drag, NestedScrollSource.Fling, NestedScrollSource.Wheel -> true
+                    else -> false
+                }
+                if (userLike && abs(available.y) > 0.5f) {
+                    cancelFollowOnUserScroll.value.invoke()
+                }
+                return Offset.Zero
+            }
+
             override fun onPostScroll(
                 consumed: Offset,
                 available: Offset,
                 source: NestedScrollSource,
             ): Offset {
+                if (programmaticScrollDepth.intValue > 0) return Offset.Zero
                 val userLike = when (source) {
                     NestedScrollSource.Drag, NestedScrollSource.Fling, NestedScrollSource.Wheel -> true
                     else -> false
@@ -238,7 +251,21 @@ fun ChatScreen(
         }
     }
 
-    /** 指で一覧を動かしたら追従オフのみ（末尾に戻したから true に戻す自動判定はしない。フリック終了の一瞬で誤復帰するため） */
+    /**
+     * ドラッグ／慣性が止まってから少し待ち、まだこれ以上下にスクロールできなければ末尾到達とみなして追従オン。
+     * 上を読んで止めた地点では canScrollForward が true のままなので勝手に追従は付かない。
+     */
+    LaunchedEffect(listState, session?.id) {
+        snapshotFlow { listState.isScrollInProgress }.collectLatest { inProgress ->
+            if (inProgress) return@collectLatest
+            delay(160)
+            if (programmaticScrollDepth.intValue != 0) return@collectLatest
+            if (!listState.canScrollForward) {
+                followStreamTail = true
+            }
+        }
+    }
+    /** レイアウトだけでは分からない「古い方へ読む」位置での追従オフ補助（メインは nestedScroll） */
     LaunchedEffect(session?.id) {
         var prevNearBottom = true
         var prevNewestVisible = true
@@ -338,6 +365,7 @@ fun ChatScreen(
      */
     LaunchedEffect(Unit) {
         snapshotFlow {
+            listState.isScrollInProgress
             val sess = ui.activeSession()
             val msgCount = sess?.messages?.size ?: 0
             Triple(
@@ -349,6 +377,7 @@ fun ChatScreen(
             val (msgSize, _, streaming) = triple
             if (!streaming) return@collectLatest
             if (!pinning) return@collectLatest
+            if (listState.isScrollInProgress) return@collectLatest
             val extra = 1
             val last = msgSize + extra - 1
             if (last < 0) return@collectLatest

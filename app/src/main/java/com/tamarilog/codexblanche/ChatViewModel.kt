@@ -40,6 +40,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.json.JsonObject
@@ -97,6 +99,17 @@ class ChatViewModel(
 
     private var sendJob: Job? = null
     private val devLogLimit = 200
+    /** 手動 Pull/Push と自動アップロードがぶつからないよう逐次化 */
+    private val driveSyncMutex = Mutex()
+
+    /** 接続時のみ Drive をローカルスナップショットで上書き。未接続は黙ってスキップ（自動同期用）。 */
+    private fun scheduleDriveAutoPush() {
+        viewModelScope.launch {
+            driveSyncMutex.withLock {
+                drivePushWork(notifyIfNotConnected = false)
+            }
+        }
+    }
 
     init {
         viewModelScope.launch {
@@ -172,6 +185,7 @@ class ChatViewModel(
             val snap = _ui.value.snapshot.copy(settings = newSettings)
             repo.saveSnapshot(snap)
             _ui.update { it.copy(snapshot = snap) }
+            scheduleDriveAutoPush()
             if (prev.rememberGoogleLogin && !newSettings.rememberGoogleLogin) {
                 googleSignOut()
             }
@@ -189,6 +203,7 @@ class ChatViewModel(
             val snap = _ui.value.snapshot.copy(settings = s)
             repo.saveSnapshot(snap)
             _ui.update { it.copy(snapshot = snap) }
+            scheduleDriveAutoPush()
         }
     }
 
@@ -291,6 +306,7 @@ class ChatViewModel(
             val snap = _ui.value.snapshot.copy(activeSessionId = sessionId)
             repo.saveSnapshot(snap)
             _ui.update { it.copy(snapshot = snap, presetPanelOpen = false) }
+            scheduleDriveAutoPush()
         }
     }
 
@@ -303,6 +319,7 @@ class ChatViewModel(
             )
             repo.saveSnapshot(snap)
             _ui.update { it.copy(snapshot = snap) }
+            scheduleDriveAutoPush()
         }
     }
 
@@ -317,6 +334,7 @@ class ChatViewModel(
             )
             repo.saveSnapshot(snap)
             _ui.update { it.copy(snapshot = snap) }
+            scheduleDriveAutoPush()
         }
     }
 
@@ -332,6 +350,7 @@ class ChatViewModel(
             }
             repo.saveSnapshot(snap)
             _ui.update { it.copy(snapshot = snap) }
+            scheduleDriveAutoPush()
         }
     }
 
@@ -340,6 +359,7 @@ class ChatViewModel(
             val snap = newSessionSnapshot(_ui.value.snapshot)
             repo.saveSnapshot(snap)
             _ui.update { it.copy(snapshot = snap, activePersonaId = null) }
+            scheduleDriveAutoPush()
         }
     }
 
@@ -406,6 +426,7 @@ class ChatViewModel(
             )
             repo.saveSnapshot(snap)
             _ui.update { it.copy(snapshot = snap, presetPanelOpen = false, activePersonaId = persona.id) }
+            scheduleDriveAutoPush()
         }
     }
 
@@ -415,6 +436,7 @@ class ChatViewModel(
             val snap = _ui.value.snapshot.copy(hiddenSystemPersonaIds = hidden.distinct())
             repo.saveSnapshot(snap)
             _ui.update { it.copy(snapshot = snap) }
+            scheduleDriveAutoPush()
         }
     }
 
@@ -427,6 +449,7 @@ class ChatViewModel(
             val snap = _ui.value.snapshot.copy(personas = _ui.value.snapshot.personas + p)
             repo.saveSnapshot(snap)
             _ui.update { it.copy(snapshot = snap) }
+            scheduleDriveAutoPush()
         }
     }
 
@@ -466,6 +489,7 @@ class ChatViewModel(
             val nextSnap = snap.copy(sessions = snap.sessions.map { if (it.id == sessionId) nextSession else it })
             repo.saveSnapshot(nextSnap)
             _ui.update { it.copy(snapshot = nextSnap) }
+            scheduleDriveAutoPush()
         }
     }
 
@@ -478,6 +502,7 @@ class ChatViewModel(
             val next = snap.copy(personas = personas)
             repo.saveSnapshot(next)
             _ui.update { it.copy(snapshot = next) }
+            scheduleDriveAutoPush()
         }
     }
 
@@ -488,6 +513,7 @@ class ChatViewModel(
             val next = snap.copy(personas = personas)
             repo.saveSnapshot(next)
             _ui.update { it.copy(snapshot = next) }
+            scheduleDriveAutoPush()
         }
     }
 
@@ -503,6 +529,7 @@ class ChatViewModel(
                     activePersonaId = if (it.activePersonaId == personaId) null else it.activePersonaId,
                 )
             }
+            scheduleDriveAutoPush()
         }
     }
 
@@ -543,6 +570,7 @@ class ChatViewModel(
             val next = snap.copy(personas = personas)
             repo.saveSnapshot(next)
             _ui.update { it.copy(snapshot = next) }
+            scheduleDriveAutoPush()
         }
     }
 
@@ -571,6 +599,7 @@ class ChatViewModel(
             val nextSnap = snap.copy(sessions = snap.sessions.map { if (it.id == sessionId) nextSession else it })
             repo.saveSnapshot(nextSnap)
             _ui.update { it.copy(snapshot = nextSnap) }
+            scheduleDriveAutoPush()
         }
     }
 
@@ -586,6 +615,7 @@ class ChatViewModel(
             val nextSnap = snap.copy(sessions = snap.sessions.map { if (it.id == sessionId) nextSession else it })
             repo.saveSnapshot(nextSnap)
             _ui.update { it.copy(snapshot = nextSnap) }
+            scheduleDriveAutoPush()
         }
     }
 
@@ -606,8 +636,9 @@ class ChatViewModel(
                 if (it.id == sessionId) it.copy(messages = contextMsgs) else it
             }
             var nextSnap = snap.copy(sessions = trimmed)
-            repo.saveSnapshot(nextSnap, bumpLocalTimestamp = false)
+            repo.saveSnapshot(nextSnap, bumpLocalTimestamp = true)
             _ui.update { it.copy(snapshot = nextSnap, sending = true, streamingAssistant = "", error = null) }
+            scheduleDriveAutoPush()
             runAssistantTurn(sessionId, nextSnap)
         }
     }
@@ -657,7 +688,7 @@ class ChatViewModel(
             var snap = snapBefore.copy(
                 sessions = snapBefore.sessions.map { if (it.id == session.id) updatedSession else it },
             )
-            repo.saveSnapshot(snap, bumpLocalTimestamp = false)
+            repo.saveSnapshot(snap, bumpLocalTimestamp = true)
             _ui.update {
                 it.copy(
                     snapshot = snap,
@@ -668,6 +699,7 @@ class ChatViewModel(
                     error = null,
                 )
             }
+            scheduleDriveAutoPush()
             runAssistantTurn(session.id, snap)
         }
     }
@@ -720,14 +752,17 @@ class ChatViewModel(
             val nextSnap = snap.copy(sessions = snap.sessions.map { if (it.id == sessionId) finalSession else it })
             repo.saveSnapshot(nextSnap)
             _ui.update { it.copy(snapshot = nextSnap, sending = false, streamingAssistant = null) }
+            scheduleDriveAutoPush()
         } catch (e: CancellationException) {
             _ui.update { it.copy(sending = false, streamingAssistant = null) }
+            scheduleDriveAutoPush()
             throw e
         } catch (e: Exception) {
             log("ERROR", e.message ?: e.toString())
             _ui.update {
                 it.copy(error = e.message ?: e.toString(), sending = false, streamingAssistant = null)
             }
+            scheduleDriveAutoPush()
         } finally {
             sendJob = null
         }
@@ -832,6 +867,7 @@ class ChatViewModel(
             )
             repo.saveSnapshot(snap)
             _ui.update { it.copy(snapshot = snap, importConfirmMessage = null) }
+            scheduleDriveAutoPush()
         }
     }
 
@@ -870,93 +906,113 @@ class ChatViewModel(
         }
     }
 
+    private suspend fun drivePushWork(notifyIfNotConnected: Boolean) {
+        try {
+            if (!drive.isConnected()) {
+                if (notifyIfNotConnected) {
+                    _ui.update { it.copy(error = "先にGoogleにサインインしてください") }
+                }
+                return
+            }
+            drive.ensureFolderAndFile(
+                _ui.value.snapshot.settings.driveFolderName,
+                _ui.value.snapshot.settings.driveFileName,
+            )
+            val snap = _ui.value.snapshot
+            var deletedAt = repo.getDeletedAt()
+            val hasData = DriveSyncRepository.hasSyncData(snap.sessions, snap.personas)
+            if (hasData) deletedAt = 0L
+            if (!hasData && deletedAt == 0L) {
+                // tombstone handled like web
+            }
+            repo.setDeletedAt(if (hasData) 0L else deletedAt)
+            deletedAt = repo.getDeletedAt()
+            val json = DriveSyncRepository.buildPayloadJson(snap.sessions, snap.personas, deletedAt)
+            val mod = drive.pushJsonBlob(json, snap.settings.driveFileName)
+            if (mod != null) repo.setLastRemoteModifiedIso(mod)
+            repo.setDeletedAt(deletedAt)
+            _ui.update {
+                it.copy(
+                    driveStatus = "Drive: 同期済み ${SimpleDateFormat("HH:mm:ss", Locale.JAPAN).format(Date())}",
+                )
+            }
+        } catch (e: Exception) {
+            _ui.update {
+                if (notifyIfNotConnected) {
+                    it.copy(driveStatus = "Drive同期失敗: ${e.message}", error = e.message)
+                } else {
+                    it.copy(driveStatus = "Drive自動同期失敗: ${e.message}")
+                }
+            }
+        }
+    }
+
     fun drivePush() {
         viewModelScope.launch {
-            try {
-                if (!drive.isConnected()) {
-                    _ui.update { it.copy(error = "先にGoogleにサインインしてください") }
-                    return@launch
-                }
-                drive.ensureFolderAndFile(
-                    _ui.value.snapshot.settings.driveFolderName,
-                    _ui.value.snapshot.settings.driveFileName,
-                )
-                val snap = _ui.value.snapshot
-                var deletedAt = repo.getDeletedAt()
-                val hasData = DriveSyncRepository.hasSyncData(snap.sessions, snap.personas)
-                if (hasData) deletedAt = 0L
-                if (!hasData && deletedAt == 0L) {
-                    // tombstone handled like web
-                }
-                repo.setDeletedAt(if (hasData) 0L else deletedAt)
-                deletedAt = repo.getDeletedAt()
-                val json = DriveSyncRepository.buildPayloadJson(snap.sessions, snap.personas, deletedAt)
-                val mod = drive.pushJsonBlob(json, snap.settings.driveFileName)
-                if (mod != null) repo.setLastRemoteModifiedIso(mod)
-                repo.setDeletedAt(deletedAt)
-                _ui.update { it.copy(driveStatus = "Drive: 同期済み ${SimpleDateFormat("HH:mm:ss", Locale.JAPAN).format(Date())}") }
-            } catch (e: Exception) {
-                _ui.update { it.copy(driveStatus = "Drive同期失敗: ${e.message}", error = e.message) }
+            driveSyncMutex.withLock {
+                drivePushWork(notifyIfNotConnected = true)
             }
         }
     }
 
     fun drivePull() {
         viewModelScope.launch {
-            try {
-                if (!drive.isConnected()) {
-                    _ui.update { it.copy(error = "先にGoogleにサインインしてください") }
-                    return@launch
-                }
-                drive.ensureFolderAndFile(
-                    _ui.value.snapshot.settings.driveFolderName,
-                    _ui.value.snapshot.settings.driveFileName,
-                )
-                if (drive.fileId == null) {
-                    _ui.update { it.copy(driveStatus = "Drive: リモートファイルなし") }
-                    return@launch
-                }
-                val remoteMod = drive.getFileModifiedTime() ?: ""
-                val remoteMs = runCatching {
-                    if (remoteMod.isBlank()) 0L else com.google.api.client.util.DateTime(remoteMod).value
-                }.getOrDefault(0L)
-                val localMs = repo.getLocalUpdatedAt()
-                val lastRemote = repo.getLastRemoteModifiedIso()
-                val lastRemoteMs = runCatching {
-                    if (lastRemote.isBlank()) 0L else com.google.api.client.util.DateTime(lastRemote).value
-                }.getOrDefault(0L)
-                val hasUnsynced = DriveSyncRepository.hasSyncData(_ui.value.snapshot.sessions, _ui.value.snapshot.personas) &&
-                    localMs > lastRemoteMs
-                if (hasUnsynced && localMs - remoteMs > 1000) {
-                    drivePush()
-                    _ui.update { it.copy(driveStatus = "Drive: ローカル優先で上書き") }
-                    return@launch
-                }
-                val body = drive.downloadBody()
-                val (rsess, rpers, rdel) = drive.parseRemotePayload(body)
-                if (rdel > 0L && repo.getDeletedAt() <= 0L && System.currentTimeMillis() - rdel <= 30L * 24 * 60 * 60 * 1000) {
-                    if (localMs <= rdel) {
-                        repo.setDeletedAt(rdel)
-                        val emptySnap = _ui.value.snapshot.copy(sessions = emptyList(), personas = emptyList())
-                        repo.saveSnapshot(repo.ensureActiveSession(emptySnap), bumpLocalTimestamp = false)
-                        if (remoteMod.isNotEmpty()) repo.setLastRemoteModifiedIso(remoteMod)
-                        _ui.update { it.copy(snapshot = repo.loadSnapshot(), driveStatus = "Drive: 削除マーク適用") }
-                        return@launch
+            driveSyncMutex.withLock {
+                try {
+                    if (!drive.isConnected()) {
+                        _ui.update { it.copy(error = "先にGoogleにサインインしてください") }
+                        return@withLock
                     }
+                    drive.ensureFolderAndFile(
+                        _ui.value.snapshot.settings.driveFolderName,
+                        _ui.value.snapshot.settings.driveFileName,
+                    )
+                    if (drive.fileId == null) {
+                        _ui.update { it.copy(driveStatus = "Drive: リモートファイルなし") }
+                        return@withLock
+                    }
+                    val remoteMod = drive.getFileModifiedTime() ?: ""
+                    val remoteMs = runCatching {
+                        if (remoteMod.isBlank()) 0L else com.google.api.client.util.DateTime(remoteMod).value
+                    }.getOrDefault(0L)
+                    val localMs = repo.getLocalUpdatedAt()
+                    val lastRemote = repo.getLastRemoteModifiedIso()
+                    val lastRemoteMs = runCatching {
+                        if (lastRemote.isBlank()) 0L else com.google.api.client.util.DateTime(lastRemote).value
+                    }.getOrDefault(0L)
+                    val hasUnsynced = DriveSyncRepository.hasSyncData(_ui.value.snapshot.sessions, _ui.value.snapshot.personas) &&
+                        localMs > lastRemoteMs
+                    if (hasUnsynced && localMs - remoteMs > 1000) {
+                        drivePushWork(notifyIfNotConnected = false)
+                        _ui.update { it.copy(driveStatus = "Drive: ローカル優先で上書き") }
+                        return@withLock
+                    }
+                    val body = drive.downloadBody()
+                    val (rsess, rpers, rdel) = drive.parseRemotePayload(body)
+                    if (rdel > 0L && repo.getDeletedAt() <= 0L && System.currentTimeMillis() - rdel <= 30L * 24 * 60 * 60 * 1000) {
+                        if (localMs <= rdel) {
+                            repo.setDeletedAt(rdel)
+                            val emptySnap = _ui.value.snapshot.copy(sessions = emptyList(), personas = emptyList())
+                            repo.saveSnapshot(repo.ensureActiveSession(emptySnap), bumpLocalTimestamp = false)
+                            if (remoteMod.isNotEmpty()) repo.setLastRemoteModifiedIso(remoteMod)
+                            _ui.update { it.copy(snapshot = repo.loadSnapshot(), driveStatus = "Drive: 削除マーク適用") }
+                            return@withLock
+                        }
+                    }
+                    var next = _ui.value.snapshot
+                    if (rsess != null) next = next.copy(sessions = rsess)
+                    if (rpers != null) next = next.copy(personas = rpers)
+                    repo.setDeletedAt(0L)
+                    next = repo.ensureActiveSession(next)
+                    if (next.activeSessionId == null || next.sessions.none { it.id == next.activeSessionId }) {
+                        next = next.copy(activeSessionId = next.sessions.firstOrNull()?.id)
+                    }
+                    repo.saveSnapshot(next, bumpLocalTimestamp = false)
+                    if (remoteMod.isNotEmpty()) repo.setLastRemoteModifiedIso(remoteMod)
+                    _ui.update { it.copy(snapshot = next, driveStatus = "Drive: 取得済み") }
+                } catch (e: Exception) {
+                    _ui.update { it.copy(driveStatus = "Drive取得失敗: ${e.message}", error = e.message) }
                 }
-                var next = _ui.value.snapshot
-                if (rsess != null) next = next.copy(sessions = rsess)
-                if (rpers != null) next = next.copy(personas = rpers)
-                repo.setDeletedAt(0L)
-                next = repo.ensureActiveSession(next)
-                if (next.activeSessionId == null || next.sessions.none { it.id == next.activeSessionId }) {
-                    next = next.copy(activeSessionId = next.sessions.firstOrNull()?.id)
-                }
-                repo.saveSnapshot(next, bumpLocalTimestamp = false)
-                if (remoteMod.isNotEmpty()) repo.setLastRemoteModifiedIso(remoteMod)
-                _ui.update { it.copy(snapshot = next, driveStatus = "Drive: 取得済み") }
-            } catch (e: Exception) {
-                _ui.update { it.copy(driveStatus = "Drive取得失敗: ${e.message}", error = e.message) }
             }
         }
     }

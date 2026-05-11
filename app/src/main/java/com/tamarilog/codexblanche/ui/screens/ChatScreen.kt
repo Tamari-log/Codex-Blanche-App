@@ -103,8 +103,8 @@ import com.tamarilog.codexblanche.ui.theme.CodexWebPalette
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.flow.conflate
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -278,7 +278,8 @@ fun ChatScreen(
     }
 
     /**
-     * collectLatest は streaming→false の瞬間に直前の scroll をキャンセルするため使わない。
+     * ストリーム中のチャンクごとに末尾へ追従。[collectLatest] で直近のみ実行し古い scroll を捨てる。
+     * streaming→false でキャンセルされるが、確定後の位置合わせは別 LaunchedEffect が担う。
      */
     LaunchedEffect(Unit) {
         snapshotFlow {
@@ -289,12 +290,12 @@ fun ChatScreen(
                 ui.streamingAssistant?.length ?: -1,
                 ui.streamingAssistant != null,
             )
-        }.conflate().collect { (msgSize, _, streaming) ->
-            if (!streaming) return@collect
+        }.collectLatest { (msgSize, _, streaming) ->
+            if (!streaming) return@collectLatest
             val extra = 1
             val last = msgSize + extra - 1
-            if (last < 0) return@collect
-            if (!listState.shouldAutoScrollToBottom(streamingActive = true)) return@collect
+            if (last < 0) return@collectLatest
+            if (!listState.shouldAutoScrollToBottom(streamingActive = true)) return@collectLatest
             programScrollMutex.withLock {
                 listState.scrollLastItemToBottomEdge()
             }
@@ -1668,11 +1669,17 @@ private fun PersonaTabPill(
     }
 }
 
+/** 末尾バブルの下端がビューポート下端よりこれだけ上に離れたら「履歴として読んでいる」とみなす（px） */
+private const val STREAMING_TAIL_ABOVE_VIEWPORT_PX = 96
+/** 十分に高い最終バブルで、上端がビューポート付近＝上の方を読んでいるとき追従しない（px） */
+private const val STREAMING_BUBBLE_TOP_NEAR_VIEWPORT_TOP_PX = 72
+
 /**
  * 会話の最下部付近にいるときだけ自動スクロールしたい。
- * - 最終メッセージより上の履歴を見ているなら false。
- * - [canScrollForward] が false なら末尾。
- * - ストリームでバブルが伸びた直後は距離判定の余裕を広げる。
+ * - 最終レイアウト行より上だけ見えているなら false。
+ * - 非ストリーム: [canScrollForward] が false、または最終行の下端がビューポート下端付近。
+ * - ストリーム: 伸びた吹き出しで「下端が大きく上」＝上を読んでいると判定。かつ「高いバブルの上端付近」も読書モード。
+ *   下端がはるか下に伸びている（追従遅れ・トークン追加）は true のまま追従する。
  */
 private fun LazyListState.shouldAutoScrollToBottom(streamingActive: Boolean): Boolean {
     val info = layoutInfo
@@ -1680,13 +1687,21 @@ private fun LazyListState.shouldAutoScrollToBottom(streamingActive: Boolean): Bo
     if (lastIndex < 0) return true
     val vis = info.visibleItemsInfo
     if (vis.isEmpty()) return true
-    // 最終メッセージより上の履歴を見ている
     if (vis.last().index < lastIndex) return false
-    if (!canScrollForward) return true
     val lastItem = vis.find { it.index == lastIndex } ?: return true
     val distancePastBottom = lastItem.offset + lastItem.size - info.viewportEndOffset
-    val slackPx = if (streamingActive) 120 else 12
-    return distancePastBottom <= slackPx
+    if (streamingActive) {
+        if (distancePastBottom < -STREAMING_TAIL_ABOVE_VIEWPORT_PX) return false
+        val viewportHeight = info.viewportEndOffset - info.viewportStartOffset
+        if (lastItem.size > viewportHeight &&
+            lastItem.offset > STREAMING_BUBBLE_TOP_NEAR_VIEWPORT_TOP_PX
+        ) {
+            return false
+        }
+        return true
+    }
+    if (!canScrollForward) return true
+    return distancePastBottom <= 12
 }
 
 /**

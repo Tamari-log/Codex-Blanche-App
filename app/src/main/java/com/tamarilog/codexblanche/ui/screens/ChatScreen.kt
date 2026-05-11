@@ -69,7 +69,6 @@ import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -132,6 +131,11 @@ fun ChatScreen(
     var messageDeleteIndex by remember { mutableStateOf<Int?>(null) }
     val scope = rememberCoroutineScope()
     val listState = rememberLazyListState()
+    /** LazyList のスクロール位置は [ui] 更新では再計算されない。末尾矢印の表示に必要。 */
+    var listCanScrollForward by remember { mutableStateOf(false) }
+    LaunchedEffect(listState) {
+        snapshotFlow { listState.canScrollForward }.collect { listCanScrollForward = it }
+    }
     /** プログラムスクロール同士の競合・キャンセルによる中途半端な scrollToItem を防ぐ */
     val programScrollMutex = remember { Mutex() }
     var userTailScrollJob by remember { mutableStateOf<Job?>(null) }
@@ -271,11 +275,7 @@ fun ChatScreen(
         }
     }
 
-    val showScrollToBottom by remember {
-        derivedStateOf {
-            ui.streamingAssistant == null && listState.canScrollForward
-        }
-    }
+    val showScrollToBottom = ui.streamingAssistant == null && listCanScrollForward
 
     if (ui.loading) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {

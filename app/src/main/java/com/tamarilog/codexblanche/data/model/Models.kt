@@ -13,6 +13,8 @@ data class MessageAttachment(
     val mimeType: String? = null,
     @SerialName("dataUrl")
     val dataUrl: String? = null,
+    @SerialName("previewText")
+    val previewText: String? = null,
     val size: Long = 0,
     @SerialName("contentIncluded")
     val contentIncluded: Boolean = false,

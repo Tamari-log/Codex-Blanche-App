@@ -1,7 +1,8 @@
 package com.tamarilog.codexblanche.ui.screens
 
-import android.content.Intent
+import android.graphics.BitmapFactory
 import android.net.Uri
+import android.util.Base64
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -14,6 +15,7 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
@@ -27,8 +29,9 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.IntrinsicSize
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.PaddingValues
@@ -37,12 +40,16 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -58,6 +65,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TextField
+import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -67,28 +75,40 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.input.pointer.pointerInput
 import coil.compose.AsyncImage
-import com.google.android.gms.common.api.ApiException
 import com.tamarilog.codexblanche.ChatViewModel
 import com.tamarilog.codexblanche.data.model.ChatMessage
 import com.tamarilog.codexblanche.data.model.ChatSession
+import com.tamarilog.codexblanche.data.model.MessageAttachment
 import com.tamarilog.codexblanche.data.model.Persona
 import com.tamarilog.codexblanche.ui.components.ChatPaperBackdrop
 import com.tamarilog.codexblanche.ui.theme.CodexWebPalette
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.conflate
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
 @Composable
@@ -106,9 +126,18 @@ fun ChatScreen(
     var personaRenameFor by remember { mutableStateOf<String?>(null) }
     var personaRenameDraft by remember { mutableStateOf("") }
     var personaDeleteConfirm by remember { mutableStateOf<String?>(null) }
+    var previewAttachment by remember { mutableStateOf<MessageAttachment?>(null) }
+    var messageEditTarget by remember { mutableStateOf<Pair<Int, String>?>(null) }
+    var messageEditDraft by remember { mutableStateOf("") }
+    var messageDeleteIndex by remember { mutableStateOf<Int?>(null) }
     val scope = rememberCoroutineScope()
     val listState = rememberLazyListState()
+    /** プログラムスクロール同士の競合・キャンセルによる中途半端な scrollToItem を防ぐ */
+    val programScrollMutex = remember { Mutex() }
+    var userTailScrollJob by remember { mutableStateOf<Job?>(null) }
     val context = LocalContext.current
+    val focusManager = LocalFocusManager.current
+    val keyboard = LocalSoftwareKeyboardController.current
 
     val isDark = when (ui.snapshot.settings.theme) {
         "dark" -> true
@@ -159,16 +188,93 @@ fun ChatScreen(
     val session = ui.activeSession()
     val messages = session?.messages.orEmpty()
 
-    LaunchedEffect(messages.size, ui.streamingAssistant) {
-        val extra = if (ui.streamingAssistant != null) 1 else 0
-        val last = messages.size + extra - 1
-        if (last >= 0) {
-            listState.animateScrollToItem(last)
+    val listBottomPadding = 8.dp
+
+    /** 起動直後・会話切替後のみ末尾へ（loading のたびに再実行しない） */
+    LaunchedEffect(session?.id) {
+        val sid = session?.id ?: return@LaunchedEffect
+        snapshotFlow { ui.loading }.first { loading -> !loading }
+        if (ui.activeSession()?.id != sid) return@LaunchedEffect
+        delay(48)
+        val sess = ui.activeSession() ?: return@LaunchedEffect
+        if (sess.id != sid) return@LaunchedEffect
+        if (sess.messages.isNotEmpty() || ui.streamingAssistant != null) {
+            programScrollMutex.withLock {
+                listState.scrollLastItemToBottomEdge()
+            }
+        }
+    }
+
+    /** AI 確定で送信用末尾スクロール Job が残っているときだけキャンセル（スクロールはしない） */
+    LaunchedEffect(Unit) {
+        var wasStreaming = false
+        snapshotFlow { ui.streamingAssistant != null }.collect { streamingOn ->
+            if (wasStreaming && !streamingOn) {
+                userTailScrollJob?.cancel()
+                userTailScrollJob = null
+            }
+            wasStreaming = streamingOn
+        }
+    }
+
+    /** ユーザー投稿が末尾に増えたときだけ（送信中＝いまのターンのユーザー発話のみ。AI 確定後は sending=false のため動かない） */
+    LaunchedEffect(session?.id) {
+        if (session?.id == null) return@LaunchedEffect
+        userTailScrollJob?.cancel()
+        userTailScrollJob = null
+        var lastCount = -1
+        snapshotFlow {
+            Triple(
+                ui.loading,
+                ui.activeSession()?.messages?.size ?: 0,
+                ui.activeSession()?.messages?.lastOrNull()?.role ?: "",
+            ) to ui.sending
+        }.collect { (triple, sending) ->
+            val (loading, c, role) = triple
+            if (loading) {
+                lastCount = c
+                return@collect
+            }
+            if (lastCount >= 0 && c == lastCount + 1 && role == "user" && sending) {
+                userTailScrollJob?.cancel()
+                userTailScrollJob = scope.launch {
+                    programScrollMutex.withLock {
+                        listState.scrollToTailAfterUserMessage(persistedMessageCount = c)
+                    }
+                }
+            }
+            lastCount = c
+        }
+    }
+
+    /**
+     * collectLatest は streaming→false の瞬間に直前の scroll をキャンセルするため使わない。
+     */
+    LaunchedEffect(Unit) {
+        snapshotFlow {
+            val sess = ui.activeSession()
+            val msgCount = sess?.messages?.size ?: 0
+            Triple(
+                msgCount,
+                ui.streamingAssistant?.length ?: -1,
+                ui.streamingAssistant != null,
+            )
+        }.conflate().collect { (msgSize, _, streaming) ->
+            if (!streaming) return@collect
+            val extra = 1
+            val last = msgSize + extra - 1
+            if (last < 0) return@collect
+            if (!listState.shouldAutoScrollToBottom(streamingActive = true)) return@collect
+            programScrollMutex.withLock {
+                listState.scrollLastItemToBottomEdge()
+            }
         }
     }
 
     val showScrollToBottom by remember {
-        derivedStateOf { listState.canScrollForward }
+        derivedStateOf {
+            ui.streamingAssistant == null && listState.canScrollForward
+        }
     }
 
     if (ui.loading) {
@@ -214,6 +320,60 @@ fun ChatScreen(
             },
             dismissButton = {
                 TextButton(onClick = { renameTarget = null }) { Text("キャンセル") }
+            },
+        )
+    }
+
+    messageEditTarget?.let { (idx, _) ->
+        val sid = session?.id
+        AlertDialog(
+            onDismissRequest = { messageEditTarget = null },
+            title = { Text("メッセージを編集") },
+            text = {
+                TextField(
+                    value = messageEditDraft,
+                    onValueChange = { messageEditDraft = it },
+                    minLines = 3,
+                    maxLines = 12,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = sid != null,
+                    onClick = {
+                        if (sid != null) {
+                            vm.updateMessageText(sid, idx, messageEditDraft)
+                            messageEditTarget = null
+                        }
+                    },
+                ) { Text("保存") }
+            },
+            dismissButton = {
+                TextButton(onClick = { messageEditTarget = null }) { Text("キャンセル") }
+            },
+        )
+    }
+
+    messageDeleteIndex?.let { idx ->
+        val sid = session?.id
+        AlertDialog(
+            onDismissRequest = { messageDeleteIndex = null },
+            title = { Text("削除の確認") },
+            text = { Text("このメッセージを削除しますか？") },
+            confirmButton = {
+                TextButton(
+                    enabled = sid != null,
+                    onClick = {
+                        if (sid != null) {
+                            vm.deleteMessage(sid, idx)
+                            messageDeleteIndex = null
+                        }
+                    },
+                ) { Text("削除") }
+            },
+            dismissButton = {
+                TextButton(onClick = { messageDeleteIndex = null }) { Text("キャンセル") }
             },
         )
     }
@@ -309,7 +469,7 @@ fun ChatScreen(
     }
 
     val chatBg = if (isDark) CodexWebPalette.chatAreaDark else CodexWebPalette.chatAreaLight
-    val footerBg = if (isDark) Color(0xFF1E293B) else CodexWebPalette.footerBarLight
+    val footerBg = if (isDark) CodexWebPalette.footerBarDark else CodexWebPalette.footerBarLight
     val headerDivider = if (isDark) CodexWebPalette.headerBorderDark else CodexWebPalette.headerBorderLight
 
     BoxWithConstraints(
@@ -340,7 +500,7 @@ fun ChatScreen(
                         Text(
                             text = "CODEX BLANCHE",
                             style = MaterialTheme.typography.titleLarge,
-                            color = if (isDark) Color(0xFFE2E8F0) else Color(0xFF40260F),
+                            color = if (isDark) CodexWebPalette.slate200 else CodexWebPalette.brownTitle,
                             modifier = Modifier
                                 .weight(1f)
                                 .clickable {
@@ -350,12 +510,14 @@ fun ChatScreen(
                         EmojiIconButton(
                             emoji = "☁️",
                             isDark = isDark,
+                            lightSurface = Color.White,
                             onClick = { vm.drivePull() },
                         )
                         Spacer(Modifier.width(8.dp))
                         EmojiIconButton(
                             emoji = "⚙️",
                             isDark = isDark,
+                            lightSurface = Color.White,
                             onClick = onOpenSettings,
                         )
                     }
@@ -386,7 +548,15 @@ fun ChatScreen(
                     Box(
                         modifier = Modifier
                             .weight(1f)
-                            .fillMaxWidth(),
+                            .fillMaxWidth()
+                            .pointerInput(Unit) {
+                                detectTapGestures(
+                                    onTap = {
+                                        keyboard?.hide()
+                                        focusManager.clearFocus(force = true)
+                                    },
+                                )
+                            },
                     ) {
                         ChatPaperBackdrop(isDark = isDark, baseColor = chatBg) {
                             LazyColumn(
@@ -396,7 +566,7 @@ fun ChatScreen(
                                     start = 16.dp,
                                     end = 16.dp,
                                     top = 16.dp,
-                                    bottom = 8.dp,
+                                    bottom = listBottomPadding,
                                 ),
                                 verticalArrangement = Arrangement.spacedBy(32.dp),
                             ) {
@@ -405,20 +575,37 @@ fun ChatScreen(
                                     Text(
                                         "ようこそ、白い写本へ。",
                                         style = MaterialTheme.typography.bodyLarge,
-                                        color = if (isDark) Color(0xFFCBD5E1) else Color(0xFF64748B),
+                                        color = if (isDark) CodexWebPalette.slate300 else CodexWebPalette.slate500,
                                         modifier = Modifier.padding(start = 4.dp),
                                     )
                                 }
                             }
-                            itemsIndexed(messages) { _, msg ->
+                            itemsIndexed(
+                                items = messages,
+                                key = { index, msg ->
+                                    "${msg.role}-${msg.text.hashCode()}-${msg.attachments.size}-$index"
+                                },
+                            ) { index, msg ->
                                 ChatWebBubble(
                                     msg = msg,
                                     session = session,
                                     isDark = isDark,
+                                    actionsEnabled = !ui.sending && session != null,
+                                    onPreviewAttachment = { previewAttachment = it },
+                                    onEdit = {
+                                        messageEditTarget = index to msg.text
+                                        messageEditDraft = msg.text
+                                    },
+                                    onDelete = { messageDeleteIndex = index },
+                                    onRetry = if (msg.role == "user" && session != null) {
+                                        { vm.regenerateAt(session.id, index) }
+                                    } else {
+                                        null
+                                    },
                                 )
                             }
                             if (ui.streamingAssistant != null) {
-                                item {
+                                item(key = "streaming_ai") {
                                     StreamingAiBubble(
                                         text = ui.streamingAssistant ?: "",
                                         isDark = isDark,
@@ -432,23 +619,24 @@ fun ChatScreen(
                             Button(
                                 onClick = {
                                     scope.launch {
-                                        val n = listState.layoutInfo.totalItemsCount
-                                        if (n > 0) listState.animateScrollToItem(n - 1)
+                                        programScrollMutex.withLock {
+                                            listState.scrollLastItemToBottomEdge()
+                                        }
                                     }
                                 },
                                 modifier = Modifier
                                     .align(Alignment.BottomCenter)
-                                    .padding(bottom = 100.dp)
+                                    .padding(bottom = 5.dp)
                                     .size(42.dp),
                                 shape = CircleShape,
                                 contentPadding = PaddingValues(0.dp),
                                 colors = ButtonDefaults.buttonColors(
-                                    containerColor = if (isDark) Color(0xEB1E293B) else Color(0xE6FFFFFF),
-                                    contentColor = if (isDark) Color(0xFFF8FAFC) else Color(0xFF40260F),
+                                    containerColor = if (isDark) CodexWebPalette.scrollToBottomFabDark else CodexWebPalette.scrollToBottomFabLight,
+                                    contentColor = if (isDark) CodexWebPalette.slate50 else CodexWebPalette.brownTitle,
                                 ),
                                 border = BorderStroke(
                                     1.dp,
-                                    if (isDark) Color(0x99CBD5E1) else Color(0x807B4F24),
+                                    if (isDark) CodexWebPalette.borderFrostLight else CodexWebPalette.borderUserTint,
                                 ),
                             ) {
                                 Text("↓", fontWeight = FontWeight.Bold)
@@ -469,7 +657,7 @@ fun ChatScreen(
                         Text(
                             text = ui.driveStatus,
                             style = MaterialTheme.typography.bodySmall,
-                            color = if (isDark) Color(0xFFCBD5E1) else Color(0xFF475569),
+                            color = if (isDark) CodexWebPalette.slate300 else CodexWebPalette.slate600,
                             modifier = Modifier.padding(bottom = 8.dp),
                         )
 
@@ -494,7 +682,7 @@ fun ChatScreen(
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .padding(bottom = 12.dp),
-                                verticalArrangement = Arrangement.spacedBy(6.dp),
+                                verticalArrangement = Arrangement.spacedBy(3.dp),
                             ) {
                                 ui.pendingFiles.forEachIndexed { i, f ->
                                     FilePreviewRow(
@@ -506,37 +694,52 @@ fun ChatScreen(
                             }
                         }
 
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.Bottom,
-                            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                        Surface(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(min = 56.dp),
+                            shape = RoundedCornerShape(28.dp),
+                            color = if (isDark) CodexWebPalette.slate900 else CodexWebPalette.composerCapsuleLight,
+                            border = BorderStroke(
+                                1.dp,
+                                if (isDark) CodexWebPalette.dividerSoftDark else CodexWebPalette.borderFrostLight,
+                            ),
                         ) {
-                            val fieldColors = OutlinedTextFieldDefaults.colors(
-                                focusedBorderColor = if (isDark) Color(0xFF64748B) else Color(0xFFCBD5E1),
-                                unfocusedBorderColor = if (isDark) Color(0xFF64748B) else Color(0xFFCBD5E1),
-                                focusedContainerColor = if (isDark) Color(0xFF334155) else Color(0xFFFFFFFF),
-                                unfocusedContainerColor = if (isDark) Color(0xFF334155) else Color(0xFFFFFFFF),
-                                focusedTextColor = if (isDark) Color.White else Color.Black,
-                                unfocusedTextColor = if (isDark) Color.White else Color.Black,
-                            )
-                            OutlinedTextField(
-                                value = input,
-                                onValueChange = { input = it },
-                                modifier = Modifier
-                                    .weight(8f)
-                                    .widthIn(max = Dp.Infinity),
-                                placeholder = { Text("問いを深く刻む...") },
-                                maxLines = 8,
-                                shape = RoundedCornerShape(16.dp),
-                                colors = fieldColors,
-                            )
-
                             Box(
-                                modifier = Modifier.weight(2f),
-                                contentAlignment = Alignment.Center,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 6.dp, vertical = 6.dp),
                             ) {
-                                Box {
-                                    AttachPlusButton(isDark = isDark, onClick = { attachMenu = true })
+                                TextField(
+                                    value = input,
+                                    onValueChange = { input = it },
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .align(Alignment.BottomStart)
+                                        .padding(start = 48.dp, end = 56.dp)
+                                        .heightIn(min = 44.dp, max = 140.dp),
+                                    placeholder = { Text("問いを刻む") },
+                                    maxLines = 6,
+                                    colors = TextFieldDefaults.colors(
+                                        focusedContainerColor = Color.Transparent,
+                                        unfocusedContainerColor = Color.Transparent,
+                                        disabledContainerColor = Color.Transparent,
+                                        focusedIndicatorColor = Color.Transparent,
+                                        unfocusedIndicatorColor = Color.Transparent,
+                                        disabledIndicatorColor = Color.Transparent,
+                                        focusedTextColor = if (isDark) CodexWebPalette.slate50 else CodexWebPalette.slate900,
+                                        unfocusedTextColor = if (isDark) CodexWebPalette.slate50 else CodexWebPalette.slate900,
+                                        focusedPlaceholderColor = if (isDark) CodexWebPalette.slate400 else CodexWebPalette.slate500,
+                                        unfocusedPlaceholderColor = if (isDark) CodexWebPalette.slate400 else CodexWebPalette.slate500,
+                                    ),
+                                )
+
+                                Box(modifier = Modifier.align(Alignment.BottomStart)) {
+                                    AttachPlusButton(
+                                        isDark = isDark,
+                                        onClick = { attachMenu = true },
+                                        modifier = Modifier.offset(y = (-6).dp),
+                                    )
                                     DropdownMenu(
                                         expanded = attachMenu,
                                         onDismissRequest = { attachMenu = false },
@@ -566,23 +769,21 @@ fun ChatScreen(
                                         )
                                     }
                                 }
-                            }
 
-                            Box(
-                                modifier = Modifier.weight(2f),
-                                contentAlignment = Alignment.Center,
-                            ) {
-                                SendGlyphButton(
-                                    sending = ui.sending,
-                                    isDark = isDark,
-                                    onClick = {
-                                        if (ui.sending) vm.stopGeneration()
-                                        else {
-                                            vm.sendUserMessage(input)
-                                            input = ""
-                                        }
-                                    },
-                                )
+                                Box(modifier = Modifier.align(Alignment.BottomEnd)) {
+                                    SendGlyphButton(
+                                        sending = ui.sending,
+                                        isDark = isDark,
+                                        modifier = Modifier.offset(y = (-6).dp),
+                                        onClick = {
+                                            if (ui.sending) vm.stopGeneration()
+                                            else {
+                                                vm.sendUserMessage(input)
+                                                input = ""
+                                            }
+                                        },
+                                    )
+                                }
                             }
                         }
                     }
@@ -607,7 +808,7 @@ fun ChatScreen(
                             shape = RoundedCornerShape(topEnd = 20.dp, bottomEnd = 20.dp),
                             border = BorderStroke(
                                 1.dp,
-                                if (isDark) Color(0xE647486B) else Color(0xB3B89D74),
+                                if (isDark) CodexWebPalette.presetChromeBorderDark else CodexWebPalette.presetChromeBorderLight,
                             ),
                         ) {
                             val scroll = rememberScrollState()
@@ -618,7 +819,7 @@ fun ChatScreen(
                                     .verticalScroll(scroll)
                                     .padding(horizontal = 12.dp)
                                     .padding(bottom = 12.dp),
-                                verticalArrangement = Arrangement.spacedBy(10.dp),
+                                verticalArrangement = Arrangement.spacedBy(3.dp),
                             ) {
                                 Column(Modifier.padding(bottom = 2.dp)) {
                                     OutlinedTextField(
@@ -629,14 +830,14 @@ fun ChatScreen(
                                         singleLine = true,
                                         shape = RoundedCornerShape(14.dp),
                                         colors = OutlinedTextFieldDefaults.colors(
-                                            focusedContainerColor = Color(0xA60F172A),
-                                            unfocusedContainerColor = Color(0xA60F172A),
-                                            focusedTextColor = Color(0xFFF8FAFC),
-                                            unfocusedTextColor = Color(0xFFF8FAFC),
-                                            focusedPlaceholderColor = Color(0xFF94A3B8),
-                                            unfocusedPlaceholderColor = Color(0xFF94A3B8),
-                                            focusedBorderColor = Color(0x8F94A3B8),
-                                            unfocusedBorderColor = Color(0x8F94A3B8),
+                                            focusedContainerColor = CodexWebPalette.searchFieldBg,
+                                            unfocusedContainerColor = CodexWebPalette.searchFieldBg,
+                                            focusedTextColor = CodexWebPalette.slate50,
+                                            unfocusedTextColor = CodexWebPalette.slate50,
+                                            focusedPlaceholderColor = CodexWebPalette.slate400,
+                                            unfocusedPlaceholderColor = CodexWebPalette.slate400,
+                                            focusedBorderColor = CodexWebPalette.searchFieldOutline,
+                                            unfocusedBorderColor = CodexWebPalette.searchFieldOutline,
                                         ),
                                     )
                                 }
@@ -646,7 +847,7 @@ fun ChatScreen(
                                         Text(
                                             "項目がありません",
                                             style = MaterialTheme.typography.bodySmall,
-                                            color = if (isDark) Color(0xFF94A3B8) else Color(0xFF8B7355),
+                                            color = if (isDark) CodexWebPalette.slate400 else CodexWebPalette.brownSoft,
                                             modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
                                         )
                                     } else {
@@ -676,7 +877,7 @@ fun ChatScreen(
                                         Text(
                                             "項目がありません",
                                             style = MaterialTheme.typography.bodySmall,
-                                            color = if (isDark) Color(0xFF94A3B8) else Color(0xFF8B7355),
+                                            color = if (isDark) CodexWebPalette.slate400 else CodexWebPalette.brownSoft,
                                             modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
                                         )
                                     } else {
@@ -715,7 +916,7 @@ fun ChatScreen(
                             Modifier
                                 .weight(1f)
                                 .fillMaxHeight()
-                                .background(Color(0x700F172A))
+                                .background(CodexWebPalette.drawerBackdrop)
                                 .clickable(
                                     interactionSource = remember { MutableInteractionSource() },
                                     indication = null,
@@ -726,6 +927,14 @@ fun ChatScreen(
             }
         }
     }
+
+    previewAttachment?.let { attachment ->
+        AttachmentPreviewDialog(
+            attachment = attachment,
+            isDark = isDark,
+            onDismiss = { previewAttachment = null },
+        )
+    }
 }
 
 @Composable
@@ -735,8 +944,8 @@ private fun PresetSidebarGroup(
     content: @Composable ColumnScope.() -> Unit,
 ) {
     var open by remember { mutableStateOf(true) }
-    val border = if (isDark) Color(0xD947486B) else Color(0xA6B89D74)
-    val bg = if (isDark) Color(0x730F172A) else Color(0x59FFFFFF)
+    val border = if (isDark) CodexWebPalette.drawerSessionBorder else CodexWebPalette.sidebarGroupBorder
+    val bg = if (isDark) CodexWebPalette.drawerSessionBgDark else CodexWebPalette.drawerSessionBgLight
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -748,7 +957,7 @@ private fun PresetSidebarGroup(
             Modifier
                 .fillMaxWidth()
                 .clickable { open = !open }
-                .padding(horizontal = 13.dp, vertical = 10.dp),
+                .padding(horizontal = 12.dp, vertical = 4.dp),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically,
         ) {
@@ -756,16 +965,16 @@ private fun PresetSidebarGroup(
                 title,
                 fontSize = 14.sp,
                 fontWeight = FontWeight.Bold,
-                color = if (isDark) Color(0xFFF8FAFC) else Color(0xFF4A2C12),
+                color = if (isDark) CodexWebPalette.slate50 else CodexWebPalette.captionBrown,
             )
             Text(
                 if (open) "▾" else "▸",
-                color = if (isDark) Color(0xFFF8FAFC) else Color(0xFF4A2C12),
+                color = if (isDark) CodexWebPalette.slate50 else CodexWebPalette.captionBrown,
             )
         }
         if (open) {
             Column(
-                Modifier.padding(start = 8.dp, end = 8.dp, bottom = 11.dp),
+                Modifier.padding(start = 4.dp, end = 4.dp, bottom = 3.dp),
                 content = content,
             )
         }
@@ -778,13 +987,15 @@ private fun EmojiIconButton(
     isDark: Boolean,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
+    /** ライトテーマ時の面色（ヘッダー等は白、既定はすりガラス風） */
+    lightSurface: Color = CodexWebPalette.iconButtonSurfaceLight,
 ) {
     Surface(
         onClick = onClick,
         modifier = modifier.size(40.dp),
         shape = RoundedCornerShape(12.dp),
-        color = if (isDark) Color(0xCC1E293B) else Color(0x73FFFFFF),
-        border = BorderStroke(1.dp, if (isDark) Color(0xFF475569) else CodexWebPalette.emojiBtnBorder),
+        color = if (isDark) CodexWebPalette.iconButtonSurfaceDark else lightSurface,
+        border = BorderStroke(1.dp, if (isDark) CodexWebPalette.slate600 else CodexWebPalette.emojiBtnBorder),
     ) {
         Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxSize()) {
             Text(emoji, fontSize = 20.sp)
@@ -799,12 +1010,12 @@ private fun PresetToggleButton(open: Boolean, isDark: Boolean, onClick: () -> Un
         modifier = Modifier.size(40.dp),
         shape = RoundedCornerShape(12.dp),
         color = when {
-            open && isDark -> Color(0xFF334155)
-            open -> Color(0xFF7B4F24)
-            isDark -> Color(0xCC1E293B)
-            else -> Color(0x8CFFFFFF)
+            open && isDark -> CodexWebPalette.slate700
+            open -> CodexWebPalette.userBorder
+            isDark -> CodexWebPalette.iconButtonSurfaceDark
+            else -> Color.White
         },
-        border = BorderStroke(1.dp, if (isDark) Color(0xFF475569) else Color(0xFFB89D74)),
+        border = BorderStroke(1.dp, if (isDark) CodexWebPalette.slate600 else CodexWebPalette.footerBorder),
     ) {
         Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxSize()) {
             Text("📜", fontSize = 20.sp, color = if (open) Color.White else Color.Unspecified)
@@ -813,34 +1024,43 @@ private fun PresetToggleButton(open: Boolean, isDark: Boolean, onClick: () -> Un
 }
 
 @Composable
-private fun AttachPlusButton(isDark: Boolean, onClick: () -> Unit) {
+private fun AttachPlusButton(
+    isDark: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
     Surface(
         onClick = onClick,
-        modifier = Modifier.size(44.dp),
+        modifier = modifier.size(44.dp),
         shape = CircleShape,
-        color = if (isDark) Color(0xCC1E293B) else Color(0x8CFFFFFF),
-        border = BorderStroke(1.dp, if (isDark) Color(0xFF475569) else CodexWebPalette.emojiBtnBorder),
+        color = if (isDark) CodexWebPalette.iconButtonSurfaceDark else CodexWebPalette.iconButtonSurfaceLightMedium,
+        border = BorderStroke(1.dp, if (isDark) CodexWebPalette.slate600 else CodexWebPalette.emojiBtnBorder),
     ) {
         Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxSize()) {
-            Text("＋", fontSize = 22.sp, color = if (isDark) Color(0xFFF8FAFC) else Color(0xFF40260F))
+            Text("＋", fontSize = 22.sp, color = if (isDark) CodexWebPalette.slate50 else CodexWebPalette.brownTitle)
         }
     }
 }
 
 @Composable
-private fun SendGlyphButton(sending: Boolean, isDark: Boolean, onClick: () -> Unit) {
+private fun SendGlyphButton(
+    sending: Boolean,
+    isDark: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
     Surface(
         onClick = onClick,
-        modifier = Modifier.size(48.dp),
+        modifier = modifier.size(44.dp),
         shape = CircleShape,
-        color = if (isDark) Color(0xFFF1F5F9) else CodexWebPalette.sendBtnBg,
+        color = CodexWebPalette.sendFabSurface(isDark),
         shadowElevation = 6.dp,
     ) {
         Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxSize()) {
             Text(
-                if (sending) "⏹️" else "🖋️",
-                fontSize = 22.sp,
-                color = if (isDark) Color(0xFF0F172A) else Color.White,
+                if (sending) "□" else "🖋️",
+                fontSize = if (sending) 22.sp else 20.sp,
+                color = CodexWebPalette.sendFabGlyph(isDark),
             )
         }
     }
@@ -851,29 +1071,44 @@ private fun ChatWebBubble(
     msg: ChatMessage,
     session: ChatSession?,
     isDark: Boolean,
+    actionsEnabled: Boolean,
+    onPreviewAttachment: (MessageAttachment) -> Unit,
+    onEdit: () -> Unit,
+    onDelete: () -> Unit,
+    onRetry: (() -> Unit)?,
 ) {
     val isUser = msg.role == "user"
     val sig = session?.userSignature?.takeIf { it.isNotBlank() } ?: "Blanche"
-    val labelColor = if (isDark) Color(0xFFF8FAFC) else CodexWebPalette.captionBrown
-    val lineColor = if (isDark) Color(0xFF94A3B8) else CodexWebPalette.userBorder
+    val labelColor = if (isDark) CodexWebPalette.slate50 else CodexWebPalette.captionBrown
+    val lineColor = if (isDark) CodexWebPalette.slate400 else CodexWebPalette.userBorder
     Column(
         modifier = Modifier.fillMaxWidth(),
-        horizontalAlignment = if (isUser) Alignment.End else Alignment.Start,
+        horizontalAlignment = Alignment.Start,
     ) {
-        Text(
-            text = if (isUser) "✦ $sig" else "✦ Codex",
-            style = MaterialTheme.typography.bodySmall,
-            fontWeight = FontWeight.Bold,
-            color = labelColor,
-            letterSpacing = 0.1.sp,
-            modifier = Modifier.padding(bottom = 6.dp),
-        )
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Start) {
+            Text(
+                text = if (isUser) "✦ $sig" else "✦ Codex",
+                style = MaterialTheme.typography.bodySmall,
+                fontWeight = FontWeight.Bold,
+                color = labelColor,
+                letterSpacing = 0.1.sp,
+                modifier = Modifier.padding(bottom = 6.dp),
+            )
+        }
         if (isUser) {
+            if (msg.attachments.isNotEmpty()) {
+                FlowAttachmentChips(
+                    msg = msg,
+                    userAlignRight = false,
+                    isDark = isDark,
+                    onPreviewAttachment = onPreviewAttachment,
+                )
+            }
             Row(
                 modifier = Modifier
                     .fillMaxWidth(0.92f)
                     .height(IntrinsicSize.Min),
-                horizontalArrangement = Arrangement.End,
+                horizontalArrangement = Arrangement.Start,
             ) {
                 Row(
                     modifier = Modifier.height(IntrinsicSize.Min),
@@ -891,7 +1126,7 @@ private fun ChatWebBubble(
                             fontWeight = FontWeight.Bold,
                             lineHeight = 26.sp,
                         ),
-                        color = if (isDark) Color(0xFFF1F5F9) else CodexWebPalette.userMsg,
+                        color = if (isDark) CodexWebPalette.slate100 else CodexWebPalette.userMsg,
                         modifier = Modifier.padding(start = 12.dp),
                     )
                 }
@@ -900,64 +1135,253 @@ private fun ChatWebBubble(
             Text(
                 text = msg.text,
                 style = MaterialTheme.typography.bodyLarge.copy(lineHeight = 28.sp),
-                color = if (isDark) Color(0xFFCBD5E1) else CodexWebPalette.aiMsg,
+                color = if (isDark) CodexWebPalette.slate300 else CodexWebPalette.aiMsg,
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(start = 16.dp),
             )
         }
-        if (msg.attachments.isNotEmpty()) {
-            FlowAttachmentChips(msg, isUser, isDark)
+        if (!isUser && msg.attachments.isNotEmpty()) {
+            FlowAttachmentChips(
+                msg = msg,
+                userAlignRight = false,
+                isDark = isDark,
+                onPreviewAttachment = onPreviewAttachment,
+            )
+        }
+        Row(
+            modifier = Modifier
+                .padding(top = 6.dp)
+                .fillMaxWidth()
+                .padding(start = 16.dp),
+            horizontalArrangement = Arrangement.spacedBy(0.dp),
+        ) {
+            TextButton(
+                onClick = onEdit,
+                enabled = actionsEnabled,
+                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+            ) {
+                Text("編集", style = MaterialTheme.typography.labelMedium)
+            }
+            TextButton(
+                onClick = onDelete,
+                enabled = actionsEnabled,
+                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+            ) {
+                Text("削除", style = MaterialTheme.typography.labelMedium)
+            }
+            if (isUser && onRetry != null) {
+                TextButton(
+                    onClick = onRetry,
+                    enabled = actionsEnabled,
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                ) {
+                    Text("やり直し", style = MaterialTheme.typography.labelMedium)
+                }
+            }
         }
     }
 }
 
 @Composable
-private fun FlowAttachmentChips(msg: ChatMessage, userAlignRight: Boolean, isDark: Boolean) {
+private fun FlowAttachmentChips(
+    msg: ChatMessage,
+    userAlignRight: Boolean,
+    isDark: Boolean,
+    onPreviewAttachment: (MessageAttachment) -> Unit,
+) {
     Row(
         modifier = Modifier
-            .padding(top = 8.dp)
+            .padding(top = 4.dp, bottom = 8.dp)
+            .horizontalScroll(rememberScrollState())
             .fillMaxWidth(),
         horizontalArrangement = if (userAlignRight) Arrangement.End else Arrangement.Start,
-        // simple row wrap substitute: single row truncate
     ) {
-        msg.attachments.take(4).forEach { a ->
-            val t = when (a.type) {
-                "image" -> "🖼 ${a.name ?: "image"}"
-                else -> "📎 ${a.name ?: a.mimeType ?: "?"}"
-            }
+        msg.attachments.forEach { a ->
+            val isImage = a.type == "image" && !a.dataUrl.isNullOrBlank()
             Surface(
+                onClick = { onPreviewAttachment(a) },
                 shape = RoundedCornerShape(10.dp),
-                color = if (isDark) Color(0x591E293B) else Color(0x80FFFFFF),
-                border = BorderStroke(1.dp, if (isDark) Color(0x6694A3B8) else CodexWebPalette.fileChipBorder),
+                color = if (isDark) CodexWebPalette.attachmentChipBgDark else CodexWebPalette.attachmentChipBgLight,
+                border = BorderStroke(1.dp, if (isDark) CodexWebPalette.attachmentChipBorderDark else CodexWebPalette.fileChipBorder),
                 modifier = Modifier.padding(4.dp),
             ) {
-                Text(
-                    t,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    style = MaterialTheme.typography.bodySmall,
-                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
-                )
+                if (isImage) {
+                    DataUrlImage(
+                        dataUrl = a.dataUrl,
+                        contentDescription = a.name ?: "image",
+                        modifier = Modifier
+                            .size(width = 92.dp, height = 64.dp)
+                            .clip(RoundedCornerShape(10.dp)),
+                        contentScale = ContentScale.Crop,
+                    )
+                } else {
+                    Column(
+                        modifier = Modifier
+                            .widthIn(min = 100.dp, max = 180.dp)
+                            .padding(horizontal = 10.dp, vertical = 8.dp),
+                        verticalArrangement = Arrangement.spacedBy(2.dp),
+                    ) {
+                        Text(
+                            text = "📎 ${a.name ?: "file"}",
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                        Text(
+                            text = a.mimeType ?: "不明な形式",
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = if (isDark) CodexWebPalette.slate400 else CodexWebPalette.slate500,
+                        )
+                    }
+                }
             }
         }
     }
+}
+
+@Composable
+private fun AttachmentPreviewDialog(
+    attachment: MessageAttachment,
+    isDark: Boolean,
+    onDismiss: () -> Unit,
+) {
+    Dialog(onDismissRequest = onDismiss) {
+        Surface(
+            shape = RoundedCornerShape(16.dp),
+            color = if (isDark) CodexWebPalette.slate900 else Color.White,
+            border = BorderStroke(
+                1.dp,
+                if (isDark) CodexWebPalette.imageCardScrimDark else CodexWebPalette.imageCardScrimLight,
+            ),
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(14.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                Text(
+                    text = attachment.name ?: "添付ファイル",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = if (isDark) CodexWebPalette.slate50 else CodexWebPalette.slate900,
+                )
+                if (attachment.type == "image" && !attachment.dataUrl.isNullOrBlank()) {
+                    DataUrlImage(
+                        dataUrl = attachment.dataUrl,
+                        contentDescription = attachment.name,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(min = 180.dp, max = 420.dp)
+                            .clip(RoundedCornerShape(12.dp)),
+                        contentScale = ContentScale.Fit,
+                    )
+                } else {
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = if (isDark) CodexWebPalette.sessionThumbBgDark else CodexWebPalette.slate50,
+                        border = BorderStroke(
+                            1.dp,
+                            if (isDark) CodexWebPalette.dividerSoftDark else CodexWebPalette.imageCardScrimLight,
+                        ),
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(14.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            Text("ファイル形式: ${attachment.mimeType ?: "不明"}")
+                            Text("サイズ: ${if (attachment.size > 0) "${attachment.size} bytes" else "不明"}")
+                            Text("内容添付: ${if (attachment.contentIncluded) "あり" else "メタデータのみ"}")
+                            if (!attachment.previewText.isNullOrBlank()) {
+                                Surface(
+                                    shape = RoundedCornerShape(10.dp),
+                                    color = if (isDark) CodexWebPalette.sessionListActiveDark else CodexWebPalette.slate100,
+                                    border = BorderStroke(
+                                        1.dp,
+                                        if (isDark) CodexWebPalette.dividerSoftDark else CodexWebPalette.imageCardScrimLight,
+                                    ),
+                                ) {
+                                    val scroll = rememberScrollState()
+                                    SelectionContainer {
+                                        Text(
+                                            text = attachment.previewText,
+                                            modifier = Modifier
+                                                .heightIn(max = 320.dp)
+                                                .verticalScroll(scroll)
+                                                .padding(10.dp),
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = if (isDark) CodexWebPalette.slate200 else CodexWebPalette.slate900,
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                    TextButton(onClick = onDismiss) { Text("閉じる") }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun DataUrlImage(
+    dataUrl: String?,
+    contentDescription: String?,
+    modifier: Modifier,
+    contentScale: ContentScale,
+) {
+    val bitmap = remember(dataUrl) { decodeBase64Image(dataUrl) }
+    if (bitmap != null) {
+        Image(
+            bitmap = bitmap.asImageBitmap(),
+            contentDescription = contentDescription,
+            modifier = modifier,
+            contentScale = contentScale,
+        )
+    } else {
+        AsyncImage(
+            model = dataUrl,
+            contentDescription = contentDescription,
+            modifier = modifier,
+            contentScale = contentScale,
+        )
+    }
+}
+
+private fun decodeBase64Image(dataUrl: String?): android.graphics.Bitmap? {
+    if (dataUrl.isNullOrBlank()) return null
+    val comma = dataUrl.indexOf(',')
+    if (comma <= 0) return null
+    val payload = dataUrl.substring(comma + 1)
+    return runCatching {
+        val bytes = Base64.decode(payload, Base64.DEFAULT)
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+    }.getOrNull()
 }
 
 @Composable
 private fun StreamingAiBubble(text: String, isDark: Boolean) {
     Column(modifier = Modifier.fillMaxWidth(), horizontalAlignment = Alignment.Start) {
-        Text(
-            "✦ Codex",
-            style = MaterialTheme.typography.bodySmall,
-            fontWeight = FontWeight.Bold,
-            color = if (isDark) Color(0xFFF8FAFC) else CodexWebPalette.captionBrown,
-            modifier = Modifier.padding(bottom = 6.dp),
-        )
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Start) {
+            Text(
+                "✦ Codex",
+                style = MaterialTheme.typography.bodySmall,
+                fontWeight = FontWeight.Bold,
+                color = if (isDark) CodexWebPalette.slate50 else CodexWebPalette.captionBrown,
+                modifier = Modifier.padding(bottom = 6.dp),
+            )
+        }
         Text(
             text = text,
             style = MaterialTheme.typography.bodyLarge.copy(lineHeight = 28.sp),
-            color = if (isDark) Color(0xFFCBD5E1) else CodexWebPalette.aiMsg,
+            color = if (isDark) CodexWebPalette.slate300 else CodexWebPalette.aiMsg,
             modifier = Modifier.padding(start = 16.dp),
         )
     }
@@ -972,7 +1396,7 @@ private fun ImagePreviewThumb(uri: Uri, onRemove: () -> Unit) {
             modifier = Modifier
                 .size(56.dp)
                 .clip(RoundedCornerShape(8.dp))
-                .border(1.dp, Color(0x99CBD5E1), RoundedCornerShape(8.dp)),
+                .border(1.dp, CodexWebPalette.borderFrostLight, RoundedCornerShape(8.dp)),
             contentScale = ContentScale.Crop,
         )
         Surface(
@@ -982,7 +1406,7 @@ private fun ImagePreviewThumb(uri: Uri, onRemove: () -> Unit) {
                 .offset(4.dp, (-4).dp)
                 .size(20.dp),
             shape = CircleShape,
-            color = Color(0xE60F172A),
+            color = CodexWebPalette.scrimHeavy,
         ) {
             Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxSize()) {
                 Text("×", color = Color.White, fontSize = 12.sp)
@@ -997,15 +1421,15 @@ private fun FilePreviewRow(name: String, isDark: Boolean, onRemove: () -> Unit) 
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(10.dp))
-            .background(if (isDark) Color(0x591E293B) else Color(0x85FFFFFF))
-            .border(1.dp, if (isDark) Color(0x6694A3B8) else CodexWebPalette.fileChipBorder, RoundedCornerShape(10.dp))
+            .background(if (isDark) CodexWebPalette.attachmentChipBgDark else CodexWebPalette.fileChipBg)
+            .border(1.dp, if (isDark) CodexWebPalette.attachmentChipBorderDark else CodexWebPalette.fileChipBorder, RoundedCornerShape(10.dp))
             .padding(horizontal = 8.dp, vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(
             name,
             style = MaterialTheme.typography.bodySmall,
-                            color = if (isDark) Color(0xFFE2E8F0) else Color(0xFF40260F),
+                            color = if (isDark) CodexWebPalette.slate200 else CodexWebPalette.brownTitle,
             modifier = Modifier.weight(1f),
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
@@ -1013,7 +1437,7 @@ private fun FilePreviewRow(name: String, isDark: Boolean, onRemove: () -> Unit) 
         Surface(
             onClick = onRemove,
             shape = CircleShape,
-            color = Color(0xE60F172A),
+            color = CodexWebPalette.scrimHeavy,
             modifier = Modifier.size(18.dp),
         ) {
             Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxSize()) {
@@ -1038,9 +1462,9 @@ private fun CustomPersonaRow(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(vertical = 4.dp),
+            .padding(vertical = 0.dp),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        horizontalArrangement = Arrangement.spacedBy(1.dp),
     ) {
         PersonaTabPill(
             text = "${if (persona.pinned) "📌 " else ""}${persona.name}",
@@ -1054,8 +1478,8 @@ private fun CustomPersonaRow(
                 "⋯",
                 modifier = Modifier
                     .clickable { menu = true }
-                    .padding(horizontal = 6.dp, vertical = 4.dp),
-                color = if (isDark) Color(0xFFCBD5E1) else Color(0xFF8B7355),
+                    .padding(horizontal = 2.dp, vertical = 1.dp),
+                color = if (isDark) CodexWebPalette.slate300 else CodexWebPalette.brownSoft,
                 fontSize = 16.sp,
             )
             DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
@@ -1107,7 +1531,7 @@ private fun SessionHistoryRow(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(vertical = 4.dp),
+            .padding(vertical = 0.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         PersonaTabPill(
@@ -1122,8 +1546,8 @@ private fun SessionHistoryRow(
                 "⋯",
                 modifier = Modifier
                     .clickable { menu = true }
-                    .padding(horizontal = 6.dp, vertical = 4.dp),
-                color = if (isDark) Color(0xFFCBD5E1) else Color(0xFF8B7355),
+                    .padding(horizontal = 2.dp, vertical = 1.dp),
+                color = if (isDark) CodexWebPalette.slate300 else CodexWebPalette.brownSoft,
                 fontSize = 16.sp,
             )
             DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
@@ -1180,33 +1604,116 @@ private fun PersonaTabPill(
         modifier = modifier,
         shape = RoundedCornerShape(999.dp),
         color = when {
-            active && isDark -> Color(0xFF2563EB)
-            active -> Color(0xFF7B4F24)
-            isDark -> Color(0xB81E293B)
-            else -> Color(0x59FFFFFF)
+            active && isDark -> CodexWebPalette.accentBlue
+            active -> CodexWebPalette.userBorder
+            isDark -> CodexWebPalette.tabInactiveDarkTint
+            else -> CodexWebPalette.drawerSessionBgLight
         },
         border = BorderStroke(
             1.dp,
             when {
-                active && isDark -> Color(0xFF2563EB)
-                active -> Color(0xFF7B4F24)
-                isDark -> Color(0xFF475569)
-                else -> Color(0xFFB89D74)
+                active && isDark -> CodexWebPalette.accentBlue
+                active -> CodexWebPalette.userBorder
+                isDark -> CodexWebPalette.slate600
+                else -> CodexWebPalette.footerBorder
             },
         ),
     ) {
         Text(
             text,
-            style = MaterialTheme.typography.bodySmall,
+            style = MaterialTheme.typography.bodySmall.copy(fontSize = 17.sp),
             color = when {
                 active -> Color.White
-                isDark -> Color(0xFFF8FAFC)
-                else -> Color(0xFF40260F)
+                isDark -> CodexWebPalette.slate50
+                else -> CodexWebPalette.brownTitle
             },
-            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 2.dp),
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
         )
+    }
+}
+
+/**
+ * 会話の最下部付近にいるときだけ自動スクロールしたい。
+ * - 最終メッセージより上の履歴を見ているなら false。
+ * - [canScrollForward] が false なら末尾。
+ * - ストリームでバブルが伸びた直後は距離判定の余裕を広げる。
+ */
+private fun LazyListState.shouldAutoScrollToBottom(streamingActive: Boolean): Boolean {
+    val info = layoutInfo
+    val lastIndex = info.totalItemsCount - 1
+    if (lastIndex < 0) return true
+    val vis = info.visibleItemsInfo
+    if (vis.isEmpty()) return true
+    // 最終メッセージより上の履歴を見ている
+    if (vis.last().index < lastIndex) return false
+    if (!canScrollForward) return true
+    val lastItem = vis.find { it.index == lastIndex } ?: return true
+    val distancePastBottom = lastItem.offset + lastItem.size - info.viewportEndOffset
+    val slackPx = if (streamingActive) 120 else 12
+    return distancePastBottom <= slackPx
+}
+
+/**
+ * ユーザー送信直後は LazyColumn の行数がまだ古いままのフレームがあり、
+ * 一つ前の AI 行で止まることがある。件数が c+1（確定 c 件＋ストリーム行または確定済み AI 1 行）に達してから末尾へ寄せる。
+ * 期待件数未満のときにフォールバックで scroll すると最終行がユーザーのみになり「入力に戻る」挙動になるため、条件を満たさない場合は何もしない。
+ */
+private suspend fun LazyListState.scrollToTailAfterUserMessage(
+    persistedMessageCount: Int,
+) {
+    val minLazyItemCount = persistedMessageCount + 1
+    repeat(40) {
+        if (layoutInfo.totalItemsCount >= minLazyItemCount) {
+            scrollLastItemToBottomEdge()
+            withFrameNanos { }
+            withFrameNanos { }
+            scrollLastItemToBottomEdge()
+            return
+        }
+        withFrameNanos { }
+    }
+    if (layoutInfo.totalItemsCount >= minLazyItemCount) {
+        scrollLastItemToBottomEdge()
+        withFrameNanos { }
+        scrollLastItemToBottomEdge()
+    }
+}
+
+/**
+ * 先頭で [scrollToItem] するとキャンセル時に AI 吹き出し先頭へ張り付くので、
+ * まずは [scroll] のみで下端に寄せ、最終行がまだ可視範囲にないときだけ [scrollToItem]。
+ * 計測の丸めで数 px 残ることがあるので、最後に [canScrollForward] が false になるまで微調整する。
+ */
+private suspend fun LazyListState.scrollLastItemToBottomEdge() {
+    repeat(24) {
+        val info = layoutInfo
+        val count = info.totalItemsCount
+        if (count <= 0) return
+        val lastIndex = count - 1
+        val item = info.visibleItemsInfo.find { vis -> vis.index == lastIndex }
+        if (item != null) {
+            val gap = (item.offset + item.size - info.viewportEndOffset).toFloat()
+            when {
+                gap > 4f -> scroll { scrollBy(gap) }
+                gap > 0f -> scroll { scrollBy(gap.coerceAtLeast(2f)) }
+            }
+            delay(8)
+            if (!canScrollForward) return
+        } else {
+            val maxVis = info.visibleItemsInfo.maxOfOrNull { it.index } ?: -1
+            when {
+                maxVis < lastIndex -> scrollToItem(lastIndex)
+                else -> scroll { scrollBy(96f) }
+            }
+            delay(12)
+        }
+    }
+    repeat(24) {
+        if (!canScrollForward) return
+        scroll { scrollBy(8f) }
+        delay(4)
     }
 }
 

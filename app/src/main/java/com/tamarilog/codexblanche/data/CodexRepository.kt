@@ -26,23 +26,6 @@ private val Context.codexDataStore by preferencesDataStore(name = "codex_blanche
 
 class CodexRepository(private val context: Context) {
 
-    /** Web版 stripImageDataUrlForStorage */
-    fun stripImageDataUrls(sessions: List<ChatSession>): List<ChatSession> =
-        sessions.map { session ->
-            session.copy(
-                messages = session.messages.map { msg ->
-                    if (msg.attachments.isEmpty()) msg
-                    else {
-                        msg.copy(
-                            attachments = msg.attachments.map { a ->
-                                if (a.type == "image") a.copy(dataUrl = null) else a
-                            },
-                        )
-                    }
-                },
-            )
-        }
-
     suspend fun getDeletedAt(): Long {
         val prefs = context.codexDataStore.data.first()
         return prefs[longPreferencesKey(StorageKeys.deletedAt)] ?: 0L
@@ -151,10 +134,9 @@ class CodexRepository(private val context: Context) {
     }
 
     suspend fun saveSnapshot(snapshot: AppSnapshot, bumpLocalTimestamp: Boolean = true) {
-        val strippedSessions = stripImageDataUrls(snapshot.sessions)
         val sessionsJson = CodexJson.encodeToString(
             ListSerializer(ChatSession.serializer()),
-            strippedSessions,
+            snapshot.sessions,
         )
         val personasJson = CodexJson.encodeToString(
             ListSerializer(Persona.serializer()),

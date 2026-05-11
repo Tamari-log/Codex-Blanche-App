@@ -3,6 +3,8 @@ package com.tamarilog.codexblanche
 import android.app.Application
 import android.content.Context
 import android.net.Uri
+import android.provider.OpenableColumns
+import android.webkit.MimeTypeMap
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
@@ -32,6 +34,7 @@ import com.google.api.services.drive.DriveScopes
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -184,16 +187,53 @@ class ChatViewModel(
                 _ui.update { it.copy(error = "添付は最大${AttachmentProcessor.MAX_SHARED_FILES}件までです") }
                 return@launch
             }
-            val extracted = AttachmentProcessor.createFileAttachments(appContext, uris.take(cap))
-            val merged = _ui.value.pendingFiles + extracted
+            val picked = uris.take(cap)
+            val imageUris = mutableListOf<Uri>()
+            val otherUris = mutableListOf<Uri>()
+            for (u in picked) {
+                if (isLikelyImageUri(u)) imageUris.add(u) else otherUris.add(u)
+            }
+
+            val nextImages = _ui.value.pendingImages.toMutableList()
+            for (u in imageUris) {
+                runCatching {
+                    val (dataUrl, mime) = AttachmentProcessor.readUriAsDataUrl(appContext, u)
+                    val label = displayNameOf(u) ?: u.lastPathSegment ?: "image"
+                    nextImages.add(PendingImage(u, dataUrl, mime, label))
+                }.onFailure {
+                    otherUris.add(u)
+                }
+            }
+
+            val extracted = AttachmentProcessor.createFileAttachments(appContext, otherUris)
+            val mergedFiles = _ui.value.pendingFiles + extracted
             val omitted = extracted.count { !it.contentAvailable }
             _ui.update {
                 it.copy(
-                    pendingFiles = merged,
+                    pendingImages = nextImages,
+                    pendingFiles = mergedFiles,
                     error = if (omitted > 0) "一部ファイルは内容抽出できずメタのみです（${omitted}件）" else null,
                 )
             }
         }
+    }
+
+    private fun displayNameOf(uri: Uri): String? {
+        return appContext.contentResolver.query(uri, null, null, null, null)?.use { c ->
+            if (!c.moveToFirst()) return@use null
+            val idx = c.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+            if (idx >= 0) c.getString(idx) else null
+        }
+    }
+
+    private fun isLikelyImageUri(uri: Uri): Boolean {
+        val mime = appContext.contentResolver.getType(uri).orEmpty().lowercase(Locale.ROOT)
+        if (mime.startsWith("image/")) return true
+        val name = displayNameOf(uri) ?: uri.lastPathSegment.orEmpty()
+        val ext = name.substringAfterLast('.', "").lowercase(Locale.ROOT)
+        if (ext.isBlank()) return false
+        val guessed = MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext).orEmpty()
+        return guessed.startsWith("image/")
     }
 
     fun removePendingImage(index: Int) {
@@ -500,7 +540,23 @@ class ChatViewModel(
         }
     }
 
+    fun updateMessageText(sessionId: String, index: Int, newText: String) {
+        viewModelScope.launch {
+            val normalized = normalizeEditableText(newText)
+            val snap = _ui.value.snapshot
+            val s = snap.sessions.firstOrNull { it.id == sessionId } ?: return@launch
+            if (index !in s.messages.indices) return@launch
+            val nextMsgs = s.messages.toMutableList()
+            nextMsgs[index] = nextMsgs[index].copy(text = normalized)
+            val nextSession = s.copy(messages = nextMsgs)
+            val nextSnap = snap.copy(sessions = snap.sessions.map { if (it.id == sessionId) nextSession else it })
+            repo.saveSnapshot(nextSnap)
+            _ui.update { it.copy(snapshot = nextSnap) }
+        }
+    }
+
     fun regenerateAt(sessionId: String, index: Int) {
+        if (_ui.value.sending) return
         val snap = _ui.value.snapshot
         val s = snap.sessions.firstOrNull { it.id == sessionId } ?: return
         val target = s.messages.getOrNull(index) ?: return
@@ -556,6 +612,7 @@ class ChatViewModel(
                         type = "file",
                         mimeType = f.mimeType,
                         name = f.name,
+                        previewText = f.content.takeIf { it.isNotBlank() }?.take(8000),
                         size = f.size,
                         contentIncluded = f.contentAvailable,
                     ),
@@ -601,7 +658,7 @@ class ChatViewModel(
             val renderSpeed = eff.renderSpeed.ifBlank { "normal" }
             val reply = when (eff.provider) {
                 "openai" -> {
-                    _ui.update { it.copy(streamingAssistant = null) }
+                    _ui.update { it.copy(streamingAssistant = "") }
                     openAi.complete(
                         messages = apiMessages,
                         apiKey = apiKey,
@@ -622,7 +679,9 @@ class ChatViewModel(
                     )
                 }
             }
-            val finalText = normalizeEditableText(reply).ifBlank { "（応答が空でした。もう一度お試しください）" }
+            val normalized = normalizeEditableText(reply)
+            val revealed = revealAssistantText(normalized, renderSpeed)
+            val finalText = revealed.ifBlank { "（応答が空でした。もう一度お試しください）" }
             val finalSession = session.copy(messages = session.messages + ChatMessage(role = "ai", text = finalText))
             val nextSnap = snap.copy(sessions = snap.sessions.map { if (it.id == sessionId) finalSession else it })
             repo.saveSnapshot(nextSnap)
@@ -646,25 +705,9 @@ class ChatViewModel(
         eff: EffectiveAiSettings,
         renderSpeed: String,
     ): String = withContext(Dispatchers.Default) {
-        if (renderSpeed == "batch") {
-            return@withContext gemini.generate(
-                messages = messages,
-                apiKey = apiKey,
-                model = eff.geminiModel,
-                systemInstruction = eff.systemPrompt.ifBlank { null },
-                temperature = eff.temperature,
-                maxTokens = eff.maxTokens,
-                allowSearch = eff.allowGeminiSearch,
-                onChunk = { _, _ -> },
-            )
-        }
-        val delayMs = when (renderSpeed) {
-            "slow" -> 80L
-            "fast" -> 5L
-            "live" -> 0L
-            else -> 25L
-        }
+        val charDelayMs = charRevealDelayMs(renderSpeed)
         var accumulated = ""
+        var rendered = ""
         gemini.generate(
             messages = messages,
             apiKey = apiKey,
@@ -675,15 +718,45 @@ class ChatViewModel(
             allowSearch = eff.allowGeminiSearch,
             onChunk = { delta, full ->
                 accumulated = full
-                viewModelScope.launch(Dispatchers.Main.immediate) {
-                    _ui.update { it.copy(streamingAssistant = full) }
+                val newChars = when {
+                    full.startsWith(rendered) -> full.drop(rendered.length)
+                    delta.isNotEmpty() -> delta
+                    else -> ""
                 }
-                if (delayMs > 0 && delta.isNotEmpty()) {
-                    Thread.sleep(delayMs * maxOf(1, delta.length / 4))
+                if (newChars.isNotEmpty()) {
+                    newChars.forEach { ch ->
+                        rendered += ch
+                        _ui.update { it.copy(streamingAssistant = rendered) }
+                        if (charDelayMs > 0) Thread.sleep(charDelayMs)
+                    }
+                } else {
+                    rendered = full
+                    _ui.update { it.copy(streamingAssistant = rendered) }
                 }
             },
         )
         accumulated
+    }
+
+    private suspend fun revealAssistantText(text: String, renderSpeed: String): String {
+        if (text.isBlank()) return text
+        val waitMs = charRevealDelayMs(renderSpeed)
+        var rendered = _ui.value.streamingAssistant.orEmpty()
+        if (!text.startsWith(rendered)) rendered = ""
+        for (ch in text.drop(rendered.length)) {
+            rendered += ch
+            _ui.update { it.copy(streamingAssistant = rendered) }
+            if (waitMs > 0) delay(waitMs)
+        }
+        return text
+    }
+
+    private fun charRevealDelayMs(renderSpeed: String): Long = when (renderSpeed) {
+        "slow" -> 28L
+        "fast" -> 5L
+        "live" -> 0L
+        "batch" -> 8L
+        else -> 12L
     }
 
     private fun normalizeEditableText(s: String): String =

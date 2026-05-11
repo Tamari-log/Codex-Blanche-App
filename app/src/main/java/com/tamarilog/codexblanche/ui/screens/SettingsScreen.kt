@@ -60,6 +60,7 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.google.android.gms.auth.api.signin.GoogleSignIn
+import com.tamarilog.codexblanche.ui.theme.CodexWebPalette
 import com.google.android.gms.common.api.ApiException
 import com.google.android.gms.common.api.CommonStatusCodes
 import com.tamarilog.codexblanche.ChatViewModel
@@ -106,28 +107,35 @@ private fun SettingsDest.title(): String = when (this) {
 }
 
 private object SettingsUi {
-    val screenBgLight = Color(0xFFF8F1E0)
-    val screenBgDark = Color(0xFF0F172A)
-    val headerDividerLight = Color(0xFFCBD5E1)
-    val headerDividerDark = Color(0xFF334155)
-    val titleLight = Color(0xFF1E293B)
-    val titleDark = Color(0xFFF8FAFC)
-    val h2Light = Color(0xFF0F172A)
-    val h2Dark = Color(0xFFFFFFFF)
-    val navBorderLight = Color(0xFFCBD5E1)
-    val navBorderDark = Color(0xFF475569)
-    val navBgLight = Color(0xFFFFFFFF)
-    val navBgDark = Color(0xFF1E293B)
-    val navTextLight = Color(0xFF0F172A)
-    val navTextDark = Color(0xFFF8FAFC)
-    val secondaryNavBg = Color(0xFF1E293B)
-    val secondaryNavFg = Color(0xFFFFFFFF)
-    val backBtnBgLight = Color(0xFFE2E8F0)
-    val backBtnBgDark = Color(0xFF334155)
-    val backBtnFgLight = Color(0xFF0F172A)
-    val backBtnFgDark = Color(0xFFF8FAFC)
-    val hint = Color(0xFF64748B)
-    val hintDark = Color(0xFFCBD5E1)
+    val screenBgLight = CodexWebPalette.settingsBgLight
+    val screenBgDark = CodexWebPalette.chatAreaDark
+    val headerDividerLight = CodexWebPalette.slate300
+    val headerDividerDark = CodexWebPalette.slate700
+    val titleLight = CodexWebPalette.slate800
+    val titleDark = CodexWebPalette.slate50
+    val h2Light = CodexWebPalette.slate900
+    val h2Dark = Color.White
+    val navBorderLight = CodexWebPalette.slate300
+    val navBorderDark = CodexWebPalette.slate600
+    val navBgLight = Color.White
+    val navBgDark = CodexWebPalette.slate800
+    val navTextLight = CodexWebPalette.slate900
+    val navTextDark = CodexWebPalette.slate50
+    val secondaryNavBg = CodexWebPalette.slate800
+    val secondaryNavFg = Color.White
+    val backBtnBgLight = CodexWebPalette.slate200
+    val backBtnBgDark = CodexWebPalette.slate700
+    val backBtnFgLight = CodexWebPalette.slate900
+    val backBtnFgDark = CodexWebPalette.slate50
+    val hint = CodexWebPalette.slate500
+    val hintDark = CodexWebPalette.slate300
+    val emeraldBtn = Color(0xFF047857)
+    val neutralBtn = CodexWebPalette.slate500
+    val indigoBtn = Color(0xFF4F46E5)
+    val chipBgDark = CodexWebPalette.slate700
+    val chipBgLight = CodexWebPalette.slate200
+    val chipBgLightAlt = CodexWebPalette.slate100
+    val mutedActionBtn = CodexWebPalette.slate600
     val amberLight = Color(0xFFB45309)
     val amberDark = Color(0xFFFCD34D)
 }
@@ -469,7 +477,7 @@ private fun SettingsRoot(
         Text("新しい会話を開始", fontWeight = FontWeight.Bold)
     }
     SettingsNavRow(isDark, primary = false, onClick = onReturnToLibrary) {
-        Text("書庫に戻る", fontWeight = FontWeight.Bold, color = SettingsUi.secondaryNavFg)
+        Text("書庫に戻る", fontWeight = FontWeight.Bold)
     }
 }
 
@@ -549,13 +557,13 @@ private fun SettingsAccount(
         Button(
             onClick = onGoogleConnect,
             modifier = Modifier.weight(1f),
-            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF047857), contentColor = Color.White),
+            colors = ButtonDefaults.buttonColors(containerColor = SettingsUi.emeraldBtn, contentColor = Color.White),
             shape = RoundedCornerShape(10.dp),
         ) { Text("Google接続", fontWeight = FontWeight.Bold) }
         Button(
             onClick = onGoogleDisconnect,
             modifier = Modifier.weight(1f),
-            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF64748B), contentColor = Color.White),
+            colors = ButtonDefaults.buttonColors(containerColor = SettingsUi.neutralBtn, contentColor = Color.White),
             shape = RoundedCornerShape(10.dp),
         ) { Text("接続解除", fontWeight = FontWeight.Bold) }
     }
@@ -639,7 +647,7 @@ private fun SettingsAiRoot(
     Button(
         onClick = onSavePersona,
         modifier = Modifier.fillMaxWidth(),
-        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF4F46E5), contentColor = Color.White),
+        colors = ButtonDefaults.buttonColors(containerColor = SettingsUi.indigoBtn, contentColor = Color.White),
         shape = RoundedCornerShape(10.dp),
     ) { Text("プリセット保存", fontWeight = FontWeight.Bold) }
 }
@@ -846,8 +854,8 @@ private fun SettingsAiBehavior(
             Button(
                 onClick = { onDraft(draft.copy(systemPrompt = "")) },
                 colors = ButtonDefaults.buttonColors(
-                    containerColor = if (isDark) Color(0xFF334155) else Color(0xFFE2E8F0),
-                    contentColor = if (isDark) Color.White else Color(0xFF0F172A),
+                    containerColor = if (isDark) SettingsUi.chipBgDark else SettingsUi.chipBgLight,
+                    contentColor = if (isDark) Color.White else CodexWebPalette.slate900,
                 ),
                 shape = RoundedCornerShape(10.dp),
             ) { Text("システムプロンプトを空にする") }
@@ -910,8 +918,8 @@ private fun SettingsDisplay(
         onClick = onToggleTheme,
         modifier = Modifier.fillMaxWidth(),
         colors = ButtonDefaults.buttonColors(
-            containerColor = if (isDark) Color(0xFF334155) else Color(0xFFF1F5F9),
-            contentColor = if (isDark) Color.White else Color(0xFF0F172A),
+            containerColor = if (isDark) SettingsUi.chipBgDark else SettingsUi.chipBgLightAlt,
+            contentColor = if (isDark) Color.White else CodexWebPalette.slate900,
         ),
         shape = RoundedCornerShape(12.dp),
     ) {
@@ -1004,7 +1012,7 @@ private fun SettingsDevLogs(
     Button(
         onClick = onNewSession,
         modifier = Modifier.fillMaxWidth(),
-        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF475569), contentColor = Color.White),
+        colors = ButtonDefaults.buttonColors(containerColor = SettingsUi.mutedActionBtn, contentColor = Color.White),
         shape = RoundedCornerShape(10.dp),
     ) { Text("新規会話を開始", fontWeight = FontWeight.Bold) }
 }
@@ -1026,15 +1034,15 @@ private fun SettingsDevConvExport(
         onClick = onPick,
         modifier = Modifier.fillMaxWidth(),
         colors = ButtonDefaults.buttonColors(
-            containerColor = if (isDark) Color(0xFF334155) else Color(0xFFE2E8F0),
-            contentColor = if (isDark) Color.White else Color(0xFF0F172A),
+            containerColor = if (isDark) SettingsUi.chipBgDark else SettingsUi.chipBgLight,
+            contentColor = if (isDark) Color.White else CodexWebPalette.slate900,
         ),
         shape = RoundedCornerShape(10.dp),
     ) { Text("ファイル選択", fontWeight = FontWeight.Bold) }
     Button(
         onClick = onRun,
         modifier = Modifier.fillMaxWidth(),
-        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF4F46E5), contentColor = Color.White),
+        colors = ButtonDefaults.buttonColors(containerColor = SettingsUi.indigoBtn, contentColor = Color.White),
         shape = RoundedCornerShape(10.dp),
     ) { Text("実行", fontWeight = FontWeight.Bold) }
     Text(
@@ -1061,15 +1069,15 @@ private fun SettingsDevConvHistoryOnly(
         onClick = onPick,
         modifier = Modifier.fillMaxWidth(),
         colors = ButtonDefaults.buttonColors(
-            containerColor = if (isDark) Color(0xFF334155) else Color(0xFFE2E8F0),
-            contentColor = if (isDark) Color.White else Color(0xFF0F172A),
+            containerColor = if (isDark) SettingsUi.chipBgDark else SettingsUi.chipBgLight,
+            contentColor = if (isDark) Color.White else CodexWebPalette.slate900,
         ),
         shape = RoundedCornerShape(10.dp),
     ) { Text("ファイル選択", fontWeight = FontWeight.Bold) }
     Button(
         onClick = onRun,
         modifier = Modifier.fillMaxWidth(),
-        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF4F46E5), contentColor = Color.White),
+        colors = ButtonDefaults.buttonColors(containerColor = SettingsUi.indigoBtn, contentColor = Color.White),
         shape = RoundedCornerShape(10.dp),
     ) { Text("実行", fontWeight = FontWeight.Bold) }
     Text(
@@ -1099,13 +1107,17 @@ private fun SettingsNavRow(
 ) {
     val border = if (isDark) SettingsUi.navBorderDark else SettingsUi.navBorderLight
     val bg = when {
-        !primary -> SettingsUi.secondaryNavBg
+        !primary && isDark -> SettingsUi.secondaryNavBg
+        !primary -> SettingsUi.navBgLight
         isDark -> SettingsUi.navBgDark
         else -> SettingsUi.navBgLight
     }
-    val fg = if (!primary) SettingsUi.secondaryNavFg
-    else if (isDark) SettingsUi.navTextDark
-    else SettingsUi.navTextLight
+    val fg = when {
+        !primary && isDark -> SettingsUi.secondaryNavFg
+        !primary -> SettingsUi.navTextLight
+        isDark -> SettingsUi.navTextDark
+        else -> SettingsUi.navTextLight
+    }
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -1130,8 +1142,8 @@ private fun SettingsSelectButton(
     menu: @Composable () -> Unit,
 ) {
     val border = if (isDark) SettingsUi.navBorderDark else SettingsUi.navBorderLight
-    val bg = if (isDark) Color(0xFF334155) else Color.White
-    val fg = if (isDark) Color.White else Color(0xFF0F172A)
+    val bg = if (isDark) SettingsUi.chipBgDark else Color.White
+    val fg = if (isDark) Color.White else CodexWebPalette.slate900
     BoxWithDropdown(
         expanded = expanded,
         onDismiss = onDismiss,

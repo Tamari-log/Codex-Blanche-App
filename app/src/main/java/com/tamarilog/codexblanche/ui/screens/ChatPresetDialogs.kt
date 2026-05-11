@@ -297,14 +297,14 @@ fun CustomPersonaAiConfigDialog(
                     onDismissThink = { thinkMenu = false },
                     onPick = { thinking = it; thinkMenu = false },
                 )
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Checkbox(allowGemini, onCheckedChange = { allowGemini = it })
-                    Text("Gemini の検索を許可", style = MaterialTheme.typography.bodySmall)
-                }
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Checkbox(allowOpenai, onCheckedChange = { allowOpenai = it })
-                    Text("OpenAI の検索を許可", style = MaterialTheme.typography.bodySmall)
-                }
+                OutlinedTextField(
+                    value = systemPrompt,
+                    onValueChange = { systemPrompt = it },
+                    label = { Text("システムプロンプト (任意)") },
+                    modifier = Modifier.fillMaxWidth(),
+                    minLines = 4,
+                    shape = RoundedCornerShape(8.dp),
+                )
                 Text("温度 ${"%.1f".format(temperature)}", style = MaterialTheme.typography.bodySmall)
                 Slider(
                     value = temperature.toFloat().coerceIn(0f, 2f),
@@ -321,14 +321,14 @@ fun CustomPersonaAiConfigDialog(
                     valueRange = 256f..maxCap.toFloat(),
                     steps = tokenSliderSteps(maxCap),
                 )
-                OutlinedTextField(
-                    value = systemPrompt,
-                    onValueChange = { systemPrompt = it },
-                    label = { Text("システムプロンプト (任意)") },
-                    modifier = Modifier.fillMaxWidth(),
-                    minLines = 4,
-                    shape = RoundedCornerShape(8.dp),
-                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Checkbox(allowGemini, onCheckedChange = { allowGemini = it })
+                    Text("Gemini の検索を許可", style = MaterialTheme.typography.bodySmall)
+                }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Checkbox(allowOpenai, onCheckedChange = { allowOpenai = it })
+                    Text("OpenAI の検索を許可", style = MaterialTheme.typography.bodySmall)
+                }
                 OutlinedTextField(
                     value = userSignature,
                     onValueChange = { userSignature = it },

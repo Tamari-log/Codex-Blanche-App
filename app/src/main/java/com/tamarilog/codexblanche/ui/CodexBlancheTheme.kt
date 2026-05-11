@@ -8,7 +8,6 @@ import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.SideEffect
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
@@ -18,23 +17,23 @@ import androidx.core.view.WindowCompat
 import com.tamarilog.codexblanche.ui.theme.CodexWebPalette
 
 private val SandLight = lightColorScheme(
-    primary = Color(0xFF40260F),
-    onPrimary = Color(0xFFE8D8B3),
-    primaryContainer = Color(0xFFE2CFA7),
-    onPrimaryContainer = Color(0xFF40260F),
-    secondary = Color(0xFF6B5340),
+    primary = CodexWebPalette.brownTitle,
+    onPrimary = CodexWebPalette.innerShell,
+    primaryContainer = CodexWebPalette.footerBarLight,
+    onPrimaryContainer = CodexWebPalette.brownTitle,
+    secondary = CodexWebPalette.brownSecondary,
     background = CodexWebPalette.bodyShell,
     surface = CodexWebPalette.innerShell,
-    onSurface = Color(0xFF40260F),
+    onSurface = CodexWebPalette.brownTitle,
 )
 
 private val SandDark = darkColorScheme(
-    primary = Color(0xFFE2CFA7),
-    onPrimary = Color(0xFF1E1E24),
-    primaryContainer = Color(0xFF2D333B),
-    background = Color(0xFF0F172A),
-    surface = Color(0xFF1E293B),
-    onSurface = Color(0xFFE2E8F0),
+    primary = CodexWebPalette.footerBarLight,
+    onPrimary = CodexWebPalette.slate900,
+    primaryContainer = CodexWebPalette.slate700,
+    background = CodexWebPalette.chatAreaDark,
+    surface = CodexWebPalette.slate800,
+    onSurface = CodexWebPalette.slate200,
 )
 
 private val CodexTypography = Typography(

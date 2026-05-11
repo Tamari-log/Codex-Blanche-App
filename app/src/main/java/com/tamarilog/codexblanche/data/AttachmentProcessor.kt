@@ -218,10 +218,29 @@ object AttachmentProcessor {
 
     suspend fun readUriAsDataUrl(context: Context, uri: Uri): Pair<String, String> =
         withContext(Dispatchers.IO) {
-            val mime = context.contentResolver.getType(uri) ?: "image/png"
+            val mime = resolveMimeType(context, uri)
             val bytes = context.contentResolver.openInputStream(uri)!!.use { it.readBytes() }
             val b64 = android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP)
             val dataUrl = "data:$mime;base64,$b64"
             dataUrl to mime
         }
+
+    private fun resolveMimeType(context: Context, uri: Uri): String {
+        val direct = context.contentResolver.getType(uri).orEmpty().lowercase(Locale.ROOT)
+        if (direct.startsWith("image/")) return direct
+        val extFromUri = MimeTypeMap.getFileExtensionFromUrl(uri.toString()).orEmpty().lowercase(Locale.ROOT)
+        val guessedFromUri = MimeTypeMap.getSingleton().getMimeTypeFromExtension(extFromUri).orEmpty()
+        if (guessedFromUri.startsWith("image/")) return guessedFromUri
+        var displayName = ""
+        context.contentResolver.query(uri, null, null, null, null)?.use { c ->
+            if (c.moveToFirst()) {
+                val idx = c.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                if (idx >= 0) displayName = c.getString(idx).orEmpty()
+            }
+        }
+        val extFromName = extension(displayName)
+        val guessedFromName = MimeTypeMap.getSingleton().getMimeTypeFromExtension(extFromName).orEmpty()
+        if (guessedFromName.startsWith("image/")) return guessedFromName
+        return if (direct.isNotBlank() && direct != "application/octet-stream") direct else "image/png"
+    }
 }

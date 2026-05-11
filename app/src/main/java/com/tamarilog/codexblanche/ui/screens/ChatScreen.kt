@@ -863,6 +863,8 @@ fun ChatScreen(
                                         onClick = {
                                             if (ui.sending) vm.stopGeneration()
                                             else {
+                                                keyboard?.hide()
+                                                focusManager.clearFocus(force = true)
                                                 vm.sendUserMessage(input)
                                                 input = ""
                                             }

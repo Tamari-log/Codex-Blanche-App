@@ -70,12 +70,18 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.withFrameNanos
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
+import androidx.compose.ui.input.nestedscroll.NestedScrollSource
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -109,6 +115,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlin.math.abs
 
 @Composable
 fun ChatScreen(
@@ -139,6 +146,16 @@ fun ChatScreen(
     /** プログラムスクロール同士の競合・キャンセルによる中途半端な scrollToItem を防ぐ */
     val programScrollMutex = remember { Mutex() }
     var userTailScrollJob by remember { mutableStateOf<Job?>(null) }
+    val programmaticScrollDepth = remember { mutableIntStateOf(0) }
+
+    suspend fun withProgrammaticScroll(block: suspend () -> Unit) {
+        programmaticScrollDepth.intValue++
+        try {
+            programScrollMutex.withLock { block() }
+        } finally {
+            programmaticScrollDepth.intValue--
+        }
+    }
     val context = LocalContext.current
     val focusManager = LocalFocusManager.current
     val keyboard = LocalSoftwareKeyboardController.current
@@ -191,8 +208,64 @@ fun ChatScreen(
 
     val session = ui.activeSession()
     val messages = session?.messages.orEmpty()
+    /** ユーザーが履歴を読むために上へスクロールしたら false。末尾へ戻したら true（会話切替でリセット）。 */
+    var followStreamTail by remember(session?.id) { mutableStateOf(true) }
 
     val listBottomPadding = 8.dp
+
+    val cancelFollowOnUserScroll = rememberUpdatedState { followStreamTail = false }
+    val userDragNestedScroll = remember {
+        object : NestedScrollConnection {
+            override fun onPostScroll(
+                consumed: Offset,
+                available: Offset,
+                source: NestedScrollSource,
+            ): Offset {
+                val userLike = when (source) {
+                    NestedScrollSource.Drag, NestedScrollSource.Fling, NestedScrollSource.Wheel -> true
+                    else -> false
+                }
+                if (userLike && abs(consumed.y) > 0.5f) {
+                    cancelFollowOnUserScroll.value.invoke()
+                }
+                return Offset.Zero
+            }
+        }
+    }
+
+    /** 末尾から離れた／戻ったを見て追従フラグを更新（プログラムスクロール中は無視） */
+    LaunchedEffect(session?.id) {
+        var prevNearBottom = true
+        var prevNewestVisible = true
+        snapshotFlow {
+            listState.layoutInfo
+            listOf(
+                listState.firstVisibleItemIndex,
+                listState.firstVisibleItemScrollOffset,
+                listState.layoutInfo.totalItemsCount,
+                programmaticScrollDepth.intValue,
+                if (ui.streamingAssistant != null) 1 else 0,
+            )
+        }.collect { v ->
+            val prog = v[3]
+            val streamingOn = v[4] != 0
+            val nearBottom = listState.isNearConversationBottom()
+            val newestVisible = listState.isNewestRowVisible()
+            if (prog == 0) {
+                if (streamingOn) {
+                    if (prevNewestVisible && !newestVisible) followStreamTail = false
+                    if (!prevNewestVisible && newestVisible && nearBottom) followStreamTail = true
+                } else {
+                    when {
+                        prevNearBottom && !nearBottom -> followStreamTail = false
+                        !prevNearBottom && nearBottom -> followStreamTail = true
+                    }
+                }
+            }
+            prevNearBottom = nearBottom
+            prevNewestVisible = newestVisible
+        }
+    }
 
     /** 起動直後・会話切替後のみ末尾へ（loading のたびに再実行しない） */
     LaunchedEffect(session?.id) {
@@ -203,40 +276,21 @@ fun ChatScreen(
         val sess = ui.activeSession() ?: return@LaunchedEffect
         if (sess.id != sid) return@LaunchedEffect
         if (sess.messages.isNotEmpty() || ui.streamingAssistant != null) {
-            programScrollMutex.withLock {
+            withProgrammaticScroll {
                 listState.scrollLastItemToBottomEdge()
             }
         }
     }
 
     /**
-     * AI 確定で送信用末尾スクロール Job をキャンセル。
-     * ストリーム中に末尾付近にいたときだけ、確定後に末尾へ寄せ直す（履歴を読んでいるときは動かさない）。
+     * AI 確定で送信用末尾スクロール Job だけキャンセル（確定後の強制スクロールはジャンプの原因になるため行わない）。
      */
     LaunchedEffect(Unit) {
         var wasStreaming = false
-        var atBottomWhileStreaming = true
-        snapshotFlow {
-            Triple(
-                ui.streamingAssistant != null,
-                ui.sending,
-                listState.shouldAutoScrollToBottom(streamingActive = true),
-            )
-        }.collect { (streamingOn, sending, pinToBottom) ->
-            if (streamingOn) {
-                atBottomWhileStreaming = pinToBottom
-            }
+        snapshotFlow { ui.streamingAssistant != null }.collect { streamingOn ->
             if (wasStreaming && !streamingOn) {
                 userTailScrollJob?.cancel()
                 userTailScrollJob = null
-                if (!sending && atBottomWhileStreaming) {
-                    scope.launch {
-                        programScrollMutex.withLock {
-                            delay(48)
-                            listState.scrollLastItemToBottomEdge()
-                        }
-                    }
-                }
             }
             wasStreaming = streamingOn
         }
@@ -266,9 +320,10 @@ fun ChatScreen(
                 sending &&
                 ui.streamingAssistant != null
             ) {
+                followStreamTail = true
                 userTailScrollJob?.cancel()
                 userTailScrollJob = scope.launch {
-                    programScrollMutex.withLock {
+                    withProgrammaticScroll {
                         listState.scrollToTailAfterUserMessage(persistedMessageCount = c)
                     }
                 }
@@ -278,8 +333,8 @@ fun ChatScreen(
     }
 
     /**
-     * ストリーム中のチャンクごとに末尾へ追従。[collectLatest] で直近のみ実行し古い scroll を捨てる。
-     * streaming→false でキャンセルされるが、確定後の位置合わせは別 LaunchedEffect が担う。
+     * ストリーム中のチャンクごとに末尾へ追従。followStreamTail が true のときだけ。
+     * [collectLatest] で直近のみ実行し古い scroll を捨てる。
      */
     LaunchedEffect(Unit) {
         snapshotFlow {
@@ -289,14 +344,15 @@ fun ChatScreen(
                 msgCount,
                 ui.streamingAssistant?.length ?: -1,
                 ui.streamingAssistant != null,
-            )
-        }.collectLatest { (msgSize, _, streaming) ->
+            ) to followStreamTail
+        }.collectLatest { (triple, pinning) ->
+            val (msgSize, _, streaming) = triple
             if (!streaming) return@collectLatest
+            if (!pinning) return@collectLatest
             val extra = 1
             val last = msgSize + extra - 1
             if (last < 0) return@collectLatest
-            if (!listState.shouldAutoScrollToBottom(streamingActive = true)) return@collectLatest
-            programScrollMutex.withLock {
+            withProgrammaticScroll {
                 listState.scrollLastItemToBottomEdge()
             }
         }
@@ -539,7 +595,12 @@ fun ChatScreen(
                             modifier = Modifier
                                 .weight(1f)
                                 .clickable {
-                                    scope.launch { listState.scrollToItem(0) }
+                                    scope.launch {
+                                        withProgrammaticScroll {
+                                            listState.scrollToItem(0)
+                                        }
+                                        followStreamTail = false
+                                    }
                                 },
                         )
                         EmojiIconButton(
@@ -596,7 +657,9 @@ fun ChatScreen(
                         ChatPaperBackdrop(isDark = isDark, baseColor = chatBg) {
                             LazyColumn(
                                 state = listState,
-                                modifier = Modifier.fillMaxSize(),
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .nestedScroll(userDragNestedScroll),
                                 contentPadding = PaddingValues(
                                     start = 16.dp,
                                     end = 16.dp,
@@ -654,7 +717,8 @@ fun ChatScreen(
                             Button(
                                 onClick = {
                                     scope.launch {
-                                        programScrollMutex.withLock {
+                                        followStreamTail = true
+                                        withProgrammaticScroll {
                                             listState.scrollLastItemToBottomEdge()
                                         }
                                     }
@@ -1669,39 +1733,26 @@ private fun PersonaTabPill(
     }
 }
 
-/** 末尾バブルの下端がビューポート下端よりこれだけ上に離れたら「履歴として読んでいる」とみなす（px） */
-private const val STREAMING_TAIL_ABOVE_VIEWPORT_PX = 96
-/** 十分に高い最終バブルで、上端がビューポート付近＝上の方を読んでいるとき追従しない（px） */
-private const val STREAMING_BUBBLE_TOP_NEAR_VIEWPORT_TOP_PX = 72
+/** 会話一覧の「末尾レイアウト行が見えている」か */
+private fun LazyListState.isNewestRowVisible(): Boolean {
+    val lastIndex = layoutInfo.totalItemsCount - 1
+    if (lastIndex < 0) return true
+    val vis = layoutInfo.visibleItemsInfo
+    return vis.isNotEmpty() && vis.last().index >= lastIndex
+}
 
-/**
- * 会話の最下部付近にいるときだけ自動スクロールしたい。
- * - 最終レイアウト行より上だけ見えているなら false。
- * - 非ストリーム: [canScrollForward] が false、または最終行の下端がビューポート下端付近。
- * - ストリーム: 伸びた吹き出しで「下端が大きく上」＝上を読んでいると判定。かつ「高いバブルの上端付近」も読書モード。
- *   下端がはるか下に伸びている（追従遅れ・トークン追加）は true のまま追従する。
- */
-private fun LazyListState.shouldAutoScrollToBottom(streamingActive: Boolean): Boolean {
+/** 会話一覧の「末尾にいる」か（追従 ON の判定用）。 */
+private fun LazyListState.isNearConversationBottom(): Boolean {
     val info = layoutInfo
     val lastIndex = info.totalItemsCount - 1
     if (lastIndex < 0) return true
+    if (!canScrollForward) return true
     val vis = info.visibleItemsInfo
     if (vis.isEmpty()) return true
     if (vis.last().index < lastIndex) return false
     val lastItem = vis.find { it.index == lastIndex } ?: return true
     val distancePastBottom = lastItem.offset + lastItem.size - info.viewportEndOffset
-    if (streamingActive) {
-        if (distancePastBottom < -STREAMING_TAIL_ABOVE_VIEWPORT_PX) return false
-        val viewportHeight = info.viewportEndOffset - info.viewportStartOffset
-        if (lastItem.size > viewportHeight &&
-            lastItem.offset > STREAMING_BUBBLE_TOP_NEAR_VIEWPORT_TOP_PX
-        ) {
-            return false
-        }
-        return true
-    }
-    if (!canScrollForward) return true
-    return distancePastBottom <= 12
+    return distancePastBottom <= 36
 }
 
 /**

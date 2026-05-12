@@ -7,10 +7,15 @@ import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.AnimationSpec
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.foundation.MutatePriority
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -30,7 +35,6 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.navigationBarsPadding
@@ -41,10 +45,8 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
-import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.LazyListLayoutInfo
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -71,7 +73,6 @@ import androidx.compose.material3.TextField
 import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -88,7 +89,6 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontWeight
@@ -98,6 +98,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.input.pointer.pointerInput
 import coil.compose.AsyncImage
+import com.tamarilog.codexblanche.ChatUiState
 import com.tamarilog.codexblanche.ChatViewModel
 import com.tamarilog.codexblanche.data.model.ChatMessage
 import com.tamarilog.codexblanche.data.model.ChatSession
@@ -107,16 +108,11 @@ import com.tamarilog.codexblanche.ui.components.ChatPaperBackdrop
 import com.tamarilog.codexblanche.ui.theme.CodexWebPalette
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.ensureActive
-import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.collect
-import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
-import kotlin.coroutines.coroutineContext
+import kotlinx.coroutines.withTimeoutOrNull
 
 @Composable
 fun ChatScreen(
@@ -139,18 +135,42 @@ fun ChatScreen(
     var messageDeleteIndex by remember { mutableStateOf<Int?>(null) }
     val scope = rememberCoroutineScope()
     val listState = rememberLazyListState()
+    /**
+     * 手動「一番下へ」直後、[canScrollForward] が僅かに true のまま残るのを隠す。
+     * ここを一時的に最下端とみなし、ユーザーが上へスクロールするまで FAB を出さない。
+     */
+    var scrollToBottomFabSuppressed by remember { mutableStateOf(false) }
+    var scrollToBottomFabSuppressAnchor by remember { mutableStateOf<Pair<Int, Int>?>(null) }
+    /** 起動直後〜初回最下部ジャンプ完了まで ↓FAB を出さない（瞬間表示の抑止） */
+    var suppressStartupScrollFab by remember { mutableStateOf(true) }
 
-    /** LazyList のスクロール位置は [ui] 更新では再計算されない。末尾矢印の表示に必要。 */
-    var listCanScrollForward by remember { mutableStateOf(false) }
-    LaunchedEffect(listState) {
-        snapshotFlow { listState.canScrollForward }.collect { listCanScrollForward = it }
+    LaunchedEffect(listState.canScrollForward) {
+        if (!listState.canScrollForward) {
+            scrollToBottomFabSuppressed = false
+            scrollToBottomFabSuppressAnchor = null
+        }
     }
-    /** プログラムスクロール同士の競合による中途半端な scroll を防ぐ */
-    val programScrollMutex = remember { Mutex() }
 
-    suspend fun withProgrammaticScroll(block: suspend () -> Unit) {
-        programScrollMutex.withLock { block() }
+    LaunchedEffect(
+        listState.firstVisibleItemIndex,
+        listState.firstVisibleItemScrollOffset,
+        scrollToBottomFabSuppressed,
+    ) {
+        if (!scrollToBottomFabSuppressed) return@LaunchedEffect
+        val a = scrollToBottomFabSuppressAnchor ?: return@LaunchedEffect
+        val idx = listState.firstVisibleItemIndex
+        val off = listState.firstVisibleItemScrollOffset
+        if (idx < a.first || (idx == a.first && off < a.second)) {
+            scrollToBottomFabSuppressed = false
+            scrollToBottomFabSuppressAnchor = null
+        }
     }
+
+    val showScrollToBottomButton =
+        !suppressStartupScrollFab &&
+            listState.canScrollForward &&
+            !scrollToBottomFabSuppressed
+
     val context = LocalContext.current
     val focusManager = LocalFocusManager.current
     val keyboard = LocalSoftwareKeyboardController.current
@@ -204,144 +224,74 @@ fun ChatScreen(
     val session = ui.activeSession()
     val messages = session?.messages.orEmpty()
 
-    val listBottomPadding = 8.dp
-
-    val density = LocalDensity.current
-    /** キーボード開閉でリスト領域の縦サイズが変わる。Composable コンテキストでしか読めない。 */
-    val imeBottomPx = WindowInsets.ime.getBottom(density)
-    /** Composable で読んだ IME を Hot Flow へ（snapshotFlow 内では WindowInsets を読めない） */
-    val imeBottomPxFlow = remember { MutableStateFlow(0) }
-    /** 同一フレームで collect 側に IME を先に反映（LaunchedEffect より早い） */
-    SideEffect {
-        imeBottomPxFlow.value = imeBottomPx
-    }
-
-    /** IME が開いていた状態から閉じた直後のみ、レイアウト確定後に一覧を下端へ寄せる */
-    LaunchedEffect(Unit) {
-        var prevImeBottom = imeBottomPxFlow.value
-        imeBottomPxFlow.collect { imeBottom ->
-            val imeJustClosed = prevImeBottom > 0 && imeBottom == 0
-            prevImeBottom = imeBottom
-            if (!imeJustClosed) return@collect
-            delay(48)
-            val cur = vm.uiState.value
-            val sess = cur.activeSession()
-            if (sess == null) return@collect
-            if (sess.messages.isEmpty() && cur.streamingAssistant == null) return@collect
-            withProgrammaticScroll {
-                listState.scrollLastItemToBottomEdge()
+    // --- 起動／会話切替時に一発だけ最下部へ（手動「一番下」と同様に FAB 抑止・アンカー記録まで行う） ---
+    LaunchedEffect(session?.id, ui.loading) {
+        scrollToBottomFabSuppressed = false
+        scrollToBottomFabSuppressAnchor = null
+        if (ui.loading) {
+            suppressStartupScrollFab = true
+            return@LaunchedEffect
+        }
+        if (session?.id == null) {
+            suppressStartupScrollFab = false
+            return@LaunchedEffect
+        }
+        suppressStartupScrollFab = true
+        try {
+            withTimeoutOrNull(3500L) {
+                snapshotFlow { listState.layoutInfo.totalItemsCount }.first { it > 0 }
             }
+            delay(48)
+            scrollChatListToBottomThenMarkFabSuppressed(listState) { idx, off ->
+                scrollToBottomFabSuppressed = true
+                scrollToBottomFabSuppressAnchor = idx to off
+            }
+        } finally {
+            suppressStartupScrollFab = false
         }
     }
 
-    /** 起動直後・会話切替後のみ末尾へ（loading のたびに再実行しない） */
+    // --- ユーザー送信などで確定が増え末尾が user のとき一覧末尾へ ---
     LaunchedEffect(session?.id) {
         val sid = session?.id ?: return@LaunchedEffect
-        snapshotFlow { ui.loading }.first { loading -> !loading }
-        if (ui.activeSession()?.id != sid) return@LaunchedEffect
-        delay(48)
-        val sess = ui.activeSession() ?: return@LaunchedEffect
-        if (sess.id != sid) return@LaunchedEffect
-        if (sess.messages.isNotEmpty() || ui.streamingAssistant != null) {
-            withProgrammaticScroll {
-                listState.scrollLastItemToBottomEdge()
-            }
-        }
-    }
-
-    /**
-     * ユーザー送信直後: Lazy 末尾行が揃ったら下端へ一度寄せる。
-     * ストリーム中の自動追従は別 [LaunchedEffect] のレイアウト判定のみ（ViewModel 側にスクロール用フラグなし）。
-     * - 通常送信: メッセージ件数が +1 かつ末尾 user
-     * - やり直し: 履歴が切り詰められると件数が減るため `c < lastCount`
-     * - 末尾が user のみで件数が変わらないやり直し: `sending` が false→true に立ち上がったときだけ
-     */
-    LaunchedEffect(session?.id) {
-        if (session?.id == null) return@LaunchedEffect
-        var lastCount = -1
-        var prevSending = false
+        var prevCount = session.messages.size
         snapshotFlow {
-            Triple(
-                ui.loading,
-                ui.activeSession()?.messages?.size ?: 0,
-                ui.activeSession()?.messages?.lastOrNull()?.role ?: "",
-            ) to Pair(ui.sending, ui.streamingAssistant != null)
-        }.collect { (triple, sendingPair) ->
-            val (loading, c, role) = triple
-            val sending = sendingPair.first
-            val streamingActive = sendingPair.second
-            if (loading) {
-                lastCount = c
-                prevSending = sending
+            val (n, userTail) = userTailPersistedMessageSignal(ui, sid)
+            val deferJumpToUserTail = ui.sending && !ui.streamingAssistant.isNullOrBlank()
+            Triple(n, userTail, deferJumpToUserTail)
+        }.collect { (n, userTail, deferJumpToUserTail) ->
+            if (n < 0) {
+                val cur = ui.activeSession()
+                if (cur?.id == sid) prevCount = cur.messages.size
                 return@collect
             }
-            val tailRedoSameCount =
-                sending &&
-                    streamingActive &&
-                    role == "user" &&
-                    c == lastCount &&
-                    lastCount >= 0 &&
-                    !prevSending
-
-            if (lastCount >= 0 &&
-                sending &&
-                streamingActive &&
-                role == "user" &&
-                (c == lastCount + 1 || c < lastCount || tailRedoSameCount)
-            ) {
-                scope.launch {
-                    withProgrammaticScroll {
-                        listState.scrollToTailAfterUserMessage(persistedMessageCount = c)
-                    }
+            if (userTail && n > prevCount && !deferJumpToUserTail) {
+                delay(48)
+                scrollChatListToBottomThenMarkFabSuppressed(listState) { idx, off ->
+                    scrollToBottomFabSuppressed = true
+                    scrollToBottomFabSuppressAnchor = idx to off
                 }
             }
-            lastCount = c
-            prevSending = sending
+            prevCount = n
         }
     }
 
-    /**
-     * ストリーム追従: px閾値は使わない。Lazy のフラグだけだと下端と判定がずれることがあるので、
-     * 「末尾 Lazy 行が可視」のときだけ合わせに行く一本を足す。
-     */
-    LaunchedEffect(listState, session?.id) {
-        /**
-         * 戻り値が前回合わないときだけ snapshotFlow が emit。
-         * 末尾に戻ったのにスクロール指標だけ前回と同じだと復帰しないので、可視行数・末尾 index も載せる。
-         */
-        val layoutFlow = snapshotFlow {
-            val info = listState.layoutInfo
-            val vis = info.visibleItemsInfo
-            val sess = ui.activeSession()
-            listOf(
-                sess?.messages?.size ?: 0,
-                ui.streamingAssistant?.length ?: -1,
-                if (ui.streamingAssistant != null) 1 else 0,
-                listState.firstVisibleItemIndex,
-                listState.firstVisibleItemScrollOffset,
-                if (listState.canScrollForward) 1 else 0,
-                if (listState.isScrollInProgress) 1 else 0,
-                vis.size,
-                vis.maxOfOrNull { it.index } ?: -1,
-            )
+    // --- 下端帯にあるとき自動追従。ストリーム中に canScrollForward だけ先に true になる瞬間は別判定。 ---
+    val followBottomBandPx = 30f + 25f
+    LaunchedEffect(ui.streamingAssistant, messages.size, session?.id) {
+        session ?: return@LaunchedEffect
+        withFrameNanos { }
+        if (listState.lazyListShowsChatBottomBand(followBottomBandPx)) {
+            listState.animateScrollChatListFollowToBottom(ChatFollowSpring)
+        } else if (
+            ui.streamingAssistant != null &&
+            listState.lazyListStreamGrowPastBottomWhileCanForward(followBottomBandPx)
+        ) {
+            listState.animateScrollChatListFollowToBottom(ChatFollowSpring)
         }
-        combine(layoutFlow, imeBottomPxFlow) { keys, imeBottom ->
-            keys to imeBottom
-        }
-            .collect { (_, imeBottom) ->
-                val streamingActive = ui.streamingAssistant != null
-                if (!streamingActive) return@collect
-                if (imeBottom > 0) return@collect
-                if (listState.isScrollInProgress) return@collect
-                val info = listState.layoutInfo
-                val atLazyExtentEnd = !listState.canScrollForward
-                val tailRowOnScreen = info.streamingTailVisible()
-                if (!atLazyExtentEnd && !tailRowOnScreen) return@collect
-                withProgrammaticScroll {
-                    listState.scrollLastItemToBottomEdge()
-                }
-            }
     }
+
+    val listBottomPadding = 8.dp
 
     /** プリセットパネル表示中は入力欄のキーボードを閉じる */
     LaunchedEffect(ui.presetPanelOpen) {
@@ -350,9 +300,6 @@ fun ChatScreen(
             focusManager.clearFocus(force = true)
         }
     }
-
-    /** 下端から離れているときのみ表示。ストリーム応答表示中でも手動で末尾へ戻せる（自動追従は別の LaunchedEffect）。 */
-    val showScrollToBottom = listCanScrollForward
 
     if (ui.loading) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -582,9 +529,7 @@ fun ChatScreen(
                                 .weight(1f)
                                 .clickable {
                                     scope.launch {
-                                        withProgrammaticScroll {
-                                            listState.scrollToItem(0)
-                                        }
+                                        listState.scrollToItem(0)
                                     }
                                 },
                         )
@@ -663,8 +608,8 @@ fun ChatScreen(
                             }
                             itemsIndexed(
                                 items = messages,
-                                key = { index, msg ->
-                                    "${msg.role}-${msg.text.hashCode()}-${msg.attachments.size}-$index"
+                                key = { index, _ ->
+                                    "${session?.id ?: "none"}#$index"
                                 },
                             ) { index, msg ->
                                 ChatWebBubble(
@@ -696,18 +641,19 @@ fun ChatScreen(
                             }
                         }
 
-                        if (showScrollToBottom) {
+                        if (showScrollToBottomButton) {
                             Button(
                                 onClick = {
                                     scope.launch {
-                                        withProgrammaticScroll {
-                                            listState.scrollLastItemToBottomEdge()
+                                        scrollChatListToBottomThenMarkFabSuppressed(listState) { idx, off ->
+                                            scrollToBottomFabSuppressed = true
+                                            scrollToBottomFabSuppressAnchor = idx to off
                                         }
                                     }
                                 },
                                 modifier = Modifier
                                     .align(Alignment.BottomCenter)
-                                    .padding(bottom = 5.dp)
+                                    .padding(bottom = 15.dp)
                                     .size(42.dp),
                                 shape = CircleShape,
                                 contentPadding = PaddingValues(0.dp),
@@ -723,6 +669,7 @@ fun ChatScreen(
                                 Text("↓", fontWeight = FontWeight.Bold)
                             }
                         }
+
                     }
 
                     // --- footer (composer) ---
@@ -1718,78 +1665,106 @@ private fun PersonaTabPill(
 }
 
 
-/** 応答ストリーム用の末尾 Lazy 行が、この瞬間の visible リストに載っている（画面上に出ている）。 */
-private fun LazyListLayoutInfo.streamingTailVisible(): Boolean {
-    val lastIdx = totalItemsCount - 1
-    if (lastIdx < 0 || visibleItemsInfo.isEmpty()) return false
-    return visibleItemsInfo.maxOf { it.index } == lastIdx
+/** 末尾アイテムの下端がビューポート下端付近（ギャップが [maxGapPx] 以内）なら追従対象。長文の先頭表示時（ギャップ負）は偽。 */
+private fun LazyListState.lazyListShowsChatBottomBand(maxGapPx: Float): Boolean {
+    val info = layoutInfo
+    val last = info.totalItemsCount - 1
+    if (last < 0) return true
+    val tail = info.visibleItemsInfo.find { it.index == last } ?: return false
+    val gapPx = info.viewportEndOffset.toFloat() - (tail.offset + tail.size).toFloat()
+    return gapPx >= 0f && gapPx <= maxGapPx
 }
 
 /**
- * ユーザー送信直後、確定メッセージ件数＋ストリーム行ぶんの Lazy 行が揃ってから末尾へ寄せる。
+ * ストリーム中のみ: [canScrollForward] が先に true になるが、末尾行の下端がビューポート下端を
+ * わずかに食い込んだだけ（[-pastPx, 0)）のとき。レイアウト増分が追いつく前の一瞬用。
  */
-private suspend fun LazyListState.scrollToTailAfterUserMessage(
-    persistedMessageCount: Int,
+private fun LazyListState.lazyListStreamGrowPastBottomWhileCanForward(pastPx: Float): Boolean {
+    if (!canScrollForward) return false
+    val info = layoutInfo
+    val last = info.totalItemsCount - 1
+    if (last < 0) return false
+    val tail = info.visibleItemsInfo.find { it.index == last } ?: return false
+    val gapPx = info.viewportEndOffset.toFloat() - (tail.offset + tail.size).toFloat()
+    return gapPx < 0f && gapPx >= -pastPx
+}
+
+
+/**
+ * snapshotFlow 用: 会話 [sid] の確定メッセージ件数と、末尾が user か。
+ * 別セッション表示中など [sid] と不一致なら `(-1, false)`。
+ */
+private fun userTailPersistedMessageSignal(ui: ChatUiState, sid: String): Pair<Int, Boolean> {
+    val s = ui.activeSession() ?: return Pair(-1, false)
+    if (s.id != sid) return Pair(-1, false)
+    val m = s.messages
+    val n = m.size
+    val userTail = m.lastOrNull()?.role == "user"
+    return n to userTail
+}
+
+
+
+/**
+ * 自動追従用: animateScroll で末尾へ一式寄せる（リストの慣性感のあるスクロール）。
+ */
+private val ChatFollowSpring: AnimationSpec<Float> = spring(
+    dampingRatio = Spring.DampingRatioNoBouncy,
+    stiffness = Spring.StiffnessMediumLow,
+)
+
+private suspend fun LazyListState.animateScrollChatListFollowToBottom(
+    animationSpec: AnimationSpec<Float> = ChatFollowSpring,
 ) {
-    val minLazyItemCount = persistedMessageCount + 1
-    repeat(40) {
-        coroutineContext.ensureActive()
-        if (layoutInfo.totalItemsCount >= minLazyItemCount) {
-            scrollLastItemToBottomEdge()
-            return
-        }
+    val last = layoutInfo.totalItemsCount - 1
+    if (last < 0) return
+    animateScrollToItem(index = last, scrollOffset = 0)
+    withFrameNanos { }
+    if (layoutInfo.visibleItemsInfo.none { it.index == last }) {
         withFrameNanos { }
     }
+    val t = layoutInfo.visibleItemsInfo.find { it.index == last } ?: return
+    val gap = (t.offset + t.size - layoutInfo.viewportEndOffset).toFloat()
+    if (gap == 0f) return
+    scroll(MutatePriority.Default) {
+        var prev = 0f
+        Animatable(0f).animateTo(gap, animationSpec) {
+            scrollBy(value - prev)
+            prev = value
+        }
+    }
 }
 
 /**
- * 先頭で [scrollToItem] するとキャンセル時に AI 吹き出し先頭へ張り付くので、
- * まずは [scroll] のみで下端に寄せ、最終行がまだ可視範囲にないときだけ [scrollToItem]。
- * 計測の丸めで数 px 残ることがあるので、最後に [canScrollForward] が false になるまで微調整する。
+ * 一覧末尾へジャンプ後に「一番下へ」FAB を手動タップと同様に抑止する（抑止の仕方だけ共通化。トリガーは各 LaunchedEffect / onClick に分離）。
  */
-private suspend fun LazyListState.scrollLastItemToBottomEdge() {
-    repeat(24) {
-        coroutineContext.ensureActive()
-        val info = layoutInfo
-        val count = info.totalItemsCount
-        if (count <= 0) return
-        val lastIndex = count - 1
-        val item =
-            info.visibleItemsInfo.maxByOrNull { it.index }
-                ?.takeIf { it.index == lastIndex }
-        if (item != null) {
-            val gap = (item.offset + item.size - info.viewportEndOffset).toFloat()
-            when {
-                gap > 4f -> scroll { scrollBy(gap) }
-                gap > 0f -> scroll { scrollBy(gap.coerceAtLeast(2f)) }
-            }
-            delay(8)
-            if (!canScrollForward) {
-                val snap = layoutInfo
-                val lip =
-                    snap.visibleItemsInfo.maxByOrNull { it.index }
-                        ?.takeIf { it.index == lastIndex }
-                val gapAfter =
-                    lip?.let { (it.offset + it.size - snap.viewportEndOffset).toFloat() } ?: gap
-                if (gapAfter > 8f) scrollToItem(lastIndex)
-                return
-            }
-        } else {
-            val maxVis = info.visibleItemsInfo.maxOfOrNull { it.index } ?: -1
-            when {
-                maxVis < lastIndex -> {
-                    scrollToItem(lastIndex)
-                }
-                else -> scroll { scrollBy(96f) }
-            }
-            delay(12)
-        }
+private suspend fun scrollChatListToBottomThenMarkFabSuppressed(
+    listState: LazyListState,
+    markFabSuppressed: (firstVisibleIndex: Int, firstVisibleScrollOffset: Int) -> Unit,
+) {
+    listState.scrollChatListToBottom()
+    withFrameNanos { }
+    markFabSuppressed(listState.firstVisibleItemIndex, listState.firstVisibleItemScrollOffset)
+}
+
+/**
+ * 末尾 Lazy 行の下端をビューポート下端に揃える（1 回の [scroll]）。
+ *
+ * [scrollToItem](末尾) は行の上端基準で止まりやすい。ここではレイアウト上の
+ * `gap = tail.offset + tail.size - viewportEndOffset` を [scrollBy] で打ち消す。
+ */
+private suspend fun LazyListState.scrollChatListToBottom() {
+    val last = layoutInfo.totalItemsCount - 1
+    if (last < 0) return
+    scrollToItem(last)
+    withFrameNanos { }
+    if (layoutInfo.visibleItemsInfo.none { it.index == last }) {
+        withFrameNanos { }
     }
-    repeat(24) {
-        coroutineContext.ensureActive()
-        if (!canScrollForward) return
-        scroll { scrollBy(8f) }
-        delay(4)
+    scroll {
+        val t = layoutInfo.visibleItemsInfo.find { it.index == last } ?: return@scroll
+        val gap = t.offset + t.size - layoutInfo.viewportEndOffset
+        scrollBy(gap.toFloat())
     }
 }
 

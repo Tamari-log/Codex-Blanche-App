@@ -58,6 +58,12 @@ class GeminiClient(
             throw e
         } catch (e: IllegalArgumentException) {
             throw e
+        } catch (e: ApiFailureReport) {
+            if (e.detailLines.firstOrNull()?.startsWith("HTTP") == true) {
+                nonStream(nonStreamUrl, body)
+            } else {
+                throw e
+            }
         } catch (e: Exception) {
             nonStream(nonStreamUrl, body)
         }
@@ -208,7 +214,7 @@ class GeminiClient(
         return client.newCall(request).execute().use { response ->
             if (!response.isSuccessful) {
                 val detail = response.body?.string().orEmpty()
-                throw IOException("Gemini stream ${response.code}: $detail")
+                throw ApiFailureReport.geminiHttp(response.code, detail)
             }
             val source = response.body?.source() ?: throw IOException("レスポンスボディがありません")
             var fullText = ""
@@ -222,7 +228,7 @@ class GeminiClient(
                 val candidate = parsed["candidates"]?.jsonArray?.firstOrNull()?.jsonObject
                     ?: return ""
                 if (candidate["finishReason"]?.jsonPrimitive?.content == "SAFETY") {
-                    throw IOException("Geminiの安全フィルタにより応答がブロックされました")
+                    throw ApiFailureReport.geminiSafetyFromStreamEvent(rawText)
                 }
                 val parts = candidate["content"]?.jsonObject?.get("parts")?.jsonArray ?: return ""
                 return parts.joinToString("") { part ->
@@ -284,13 +290,13 @@ class GeminiClient(
         client.newCall(request).execute().use { response ->
             val body = response.body?.string().orEmpty()
             if (!response.isSuccessful) {
-                throw IOException("Gemini API ${response.code}: $body")
+                throw ApiFailureReport.geminiHttp(response.code, body)
             }
             val root = runCatching { jsonParser.parseToJsonElement(body).jsonObject }.getOrNull()
                 ?: return "応答を取得できませんでした。"
             val candidate = root["candidates"]?.jsonArray?.firstOrNull()?.jsonObject
             if (candidate?.get("finishReason")?.jsonPrimitive?.content == "SAFETY") {
-                throw IOException("Geminiの安全フィルタにより応答がブロックされました")
+                throw ApiFailureReport.geminiSafetyFromHttpResponse(response.code, body)
             }
             return candidate?.get("content")?.jsonObject?.get("parts")?.jsonArray
                 ?.joinToString("") { it.jsonObject["text"]?.jsonPrimitive?.content ?: "" }

@@ -67,8 +67,7 @@ class OpenAiClient(
         client.newCall(request).execute().use { response ->
             val raw = response.body?.string().orEmpty()
             if (!response.isSuccessful) {
-                val detail = runCatching { json.parseToJsonElement(raw).jsonObject["error"]?.jsonObject?.get("message")?.jsonPrimitive?.content }.getOrNull() ?: raw
-                throw IllegalStateException("OpenAI API（${response.code}）: $detail")
+                throw ApiFailureReport.openAi(response.code, raw)
             }
             val root = json.parseToJsonElement(raw).jsonObject
             root["output_text"]?.jsonPrimitive?.content?.takeIf { it.isNotBlank() }

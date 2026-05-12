@@ -26,6 +26,7 @@ import com.tamarilog.codexblanche.data.model.Persona
 import com.tamarilog.codexblanche.data.model.SessionOverrides
 import com.tamarilog.codexblanche.network.GeminiClient
 import com.tamarilog.codexblanche.network.OpenAiClient
+import com.tamarilog.codexblanche.network.formatApiErrorForUser
 import com.tamarilog.codexblanche.sync.DriveSyncRepository
 import com.google.android.gms.auth.api.signin.GoogleSignIn
 import com.google.android.gms.auth.api.signin.GoogleSignInAccount
@@ -34,6 +35,8 @@ import com.google.api.services.drive.DriveScopes
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -42,7 +45,6 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import kotlinx.coroutines.withContext
 import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.booleanOrNull
@@ -710,13 +712,8 @@ class ChatViewModel(
         val eff = resolveEffectiveSettings(session, g)
         val apiKey = if (eff.provider == "openai") g.openaiApiKey.trim() else g.geminiApiKey.trim()
         if (apiKey.isEmpty()) {
-            _ui.update {
-                it.copy(
-                    error = if (eff.provider == "openai") "OpenAI API キーを設定してください" else "Gemini API キーを設定してください",
-                    sending = false,
-                    streamingAssistant = null,
-                )
-            }
+            val hint = if (eff.provider == "openai") "OpenAI API キーを設定してください" else "Gemini API キーを設定してください"
+            appendAssistantErrorMessage(sessionId, snap, hint)
             return
         }
         try {
@@ -759,13 +756,30 @@ class ChatViewModel(
             throw e
         } catch (e: Exception) {
             log("ERROR", e.message ?: e.toString())
-            _ui.update {
-                it.copy(error = e.message ?: e.toString(), sending = false, streamingAssistant = null)
-            }
-            scheduleDriveAutoPush()
+            appendAssistantErrorMessage(sessionId, snap, formatApiErrorForUser(e))
         } finally {
             sendJob = null
         }
+    }
+
+    /** API 失敗などをユーザー向け文面で確定メッセージとして積む（応答として処理を終了）。 */
+    private suspend fun appendAssistantErrorMessage(sessionId: String, snap: AppSnapshot, text: String) {
+        val session = snap.sessions.firstOrNull { it.id == sessionId } ?: return
+        val line = normalizeEditableText(text).ifBlank {
+            "API とのやりとりでエラーが発生しました。もう一度お試しください。"
+        }
+        val finalSession = session.copy(messages = session.messages + ChatMessage(role = "ai", text = line))
+        val nextSnap = snap.copy(sessions = snap.sessions.map { if (it.id == sessionId) finalSession else it })
+        repo.saveSnapshot(nextSnap)
+        _ui.update {
+            it.copy(
+                snapshot = nextSnap,
+                sending = false,
+                streamingAssistant = null,
+                error = null,
+            )
+        }
+        scheduleDriveAutoPush()
     }
 
     private suspend fun streamGeminiWithSpeed(
@@ -773,38 +787,44 @@ class ChatViewModel(
         apiKey: String,
         eff: EffectiveAiSettings,
         renderSpeed: String,
-    ): String = withContext(Dispatchers.Default) {
+    ): String = coroutineScope {
         val charDelayMs = charRevealDelayMs(renderSpeed)
-        var accumulated = ""
-        var rendered = ""
-        gemini.generate(
-            messages = messages,
-            apiKey = apiKey,
-            model = eff.geminiModel,
-            systemInstruction = eff.systemPrompt.ifBlank { null },
-            temperature = eff.temperature,
-            maxTokens = eff.maxTokens,
-            allowSearch = eff.allowGeminiSearch,
-            onChunk = { delta, full ->
-                accumulated = full
+        val inbox = Channel<String>(Channel.UNLIMITED)
+        val renderJob = launch(Dispatchers.Main.immediate) {
+            var renderedUi = ""
+            for (full in inbox) {
                 val newChars = when {
-                    full.startsWith(rendered) -> full.drop(rendered.length)
-                    delta.isNotEmpty() -> delta
+                    full.startsWith(renderedUi) -> full.drop(renderedUi.length)
+                    full.isNotEmpty() -> {
+                        renderedUi = ""
+                        full
+                    }
                     else -> ""
                 }
-                if (newChars.isNotEmpty()) {
-                    newChars.forEach { ch ->
-                        rendered += ch
-                        _ui.update { it.copy(streamingAssistant = rendered) }
-                        if (charDelayMs > 0) Thread.sleep(charDelayMs)
-                    }
-                } else {
-                    rendered = full
-                    _ui.update { it.copy(streamingAssistant = rendered) }
+                if (newChars.isEmpty()) continue
+                for (ch in newChars) {
+                    renderedUi += ch
+                    _ui.update { it.copy(streamingAssistant = renderedUi) }
+                    if (charDelayMs > 0) delay(charDelayMs)
                 }
-            },
-        )
-        accumulated
+            }
+        }
+        val reply = try {
+            gemini.generate(
+                messages = messages,
+                apiKey = apiKey,
+                model = eff.geminiModel,
+                systemInstruction = eff.systemPrompt.ifBlank { null },
+                temperature = eff.temperature,
+                maxTokens = eff.maxTokens,
+                allowSearch = eff.allowGeminiSearch,
+                onChunk = { _, full -> inbox.trySend(full) },
+            )
+        } finally {
+            inbox.close()
+            renderJob.join()
+        }
+        reply
     }
 
     private suspend fun revealAssistantText(text: String, renderSpeed: String): String {

@@ -187,7 +187,7 @@ class CodexRepository(private val context: Context) {
         }
     }
 
-    /** Web版 main.js の初回セッション確保に相当 */
+    /** 会話がまだ無い時は、最初の白紙を一枚そっと用意する。 */
     suspend fun ensureActiveSession(snapshot: AppSnapshot): AppSnapshot {
         if (snapshot.sessions.isEmpty()) {
             val id = UUID.randomUUID().toString()

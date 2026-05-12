@@ -34,7 +34,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.IntrinsicSize
-import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.padding
@@ -43,8 +42,6 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.horizontalScroll
-import androidx.compose.foundation.gestures.FlingBehavior
-import androidx.compose.foundation.gestures.ScrollScope
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -72,8 +69,6 @@ import androidx.compose.material3.TextField
 import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.animation.core.Animatable
-import androidx.compose.animation.core.exponentialDecay
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.derivedStateOf
@@ -95,11 +90,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
-import androidx.compose.ui.text.font.Font
-import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -107,7 +98,6 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import coil.compose.AsyncImage
-import com.tamarilog.codexblanche.R
 import com.tamarilog.codexblanche.ChatUiState
 import com.tamarilog.codexblanche.ChatViewModel
 import com.tamarilog.codexblanche.data.model.ChatMessage
@@ -118,7 +108,6 @@ import com.tamarilog.codexblanche.ui.components.ChatPaperBackdrop
 import com.tamarilog.codexblanche.ui.theme.CodexWebPalette
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -146,34 +135,21 @@ fun ChatScreen(
     var messageDeleteIndex by remember { mutableStateOf<Int?>(null) }
     val scope = rememberCoroutineScope()
     val listState = rememberLazyListState()
-    /**
-     * 大手チャット UI: **padding は消してない**。巨大な bottom inset を持ちつつ、
-     * (1) オーバーレイ composer がその帯を手前から覆う
-     * (2) 最終バブルに軽い下マージン（CSS margin illusion）を載せ、「終端」をメッセージ側に感じさせる
-     * (3) 緩めの末尾判定 gap ≥ -threshold
-     * ことで padding だけが単体露出しにくい知覚に寄せる。
-     */
     var composerHeightPx by remember { mutableIntStateOf(0) }
     val density = LocalDensity.current
     val composerMeasuredDp = remember(composerHeightPx, density) {
-        // 計測前はヒューリスティック（フッター＋入力のおおよその最小）
         with(density) {
-            composerHeightPx.toDp().coerceAtLeast(168.dp)
+            if (composerHeightPx == 0) 96.dp else composerHeightPx.toDp()
         }
     }
-    /** 内部的には大きめ。実際にはフッター背後へ回り込ませ、かつフラングを弱めることで単体まで届きにくくする。 */
-    val listBottomComposerInset = composerMeasuredDp + 120.dp
+    val listBottomComposerInset = composerMeasuredDp + 8.dp
 
-    /** ビューポート下端との gap がこれ以上負でも「だいたい下」とみなす（≈ ChatGPT / Web の -120px 系）。 */
     val nearBottomThresholdPx = remember(density) { with(density) { 120.dp.toPx() } }
 
-    /** 最後に見える本文バブルの下だけ。巨大 contentPadding と二段構えで「padding だけ」が視界に主导しにくい。 */
-    val chatTailBottomMarginIllusionDp = 24.dp
-
-    val chatListHeavyFling = rememberHeavierLazyChatFlingBehavior()
+    val chatMessageGapDp = 32.dp
 
     val isNearBottom by remember(listState, nearBottomThresholdPx) {
-        derivedStateOf { listState.lazyListIsNearBottom(nearBottomThresholdPx) }
+        derivedStateOf { listState.isBottomAnchorNearVisibleEnd(nearBottomThresholdPx) }
     }
 
     var autoFollow by remember { mutableStateOf(true) }
@@ -183,15 +159,26 @@ fun ChatScreen(
     }
 
     LaunchedEffect(listState, nearBottomThresholdPx) {
-        snapshotFlow { listState.isScrollInProgress }.collect { scrolling ->
-            if (!scrolling) return@collect
-            if (!listState.lazyListIsNearBottom(nearBottomThresholdPx)) {
+        var previousScrollKey = listState.scrollPositionKey()
+        snapshotFlow {
+            Triple(
+                listState.scrollPositionKey(),
+                listState.isScrollInProgress,
+                listState.isBottomAnchorNearVisibleEnd(nearBottomThresholdPx),
+            )
+        }.collect { (scrollKey, scrolling, nearBottom) ->
+            val userMovedTowardHistory = scrolling && scrollKey < previousScrollKey
+            if (userMovedTowardHistory || (scrolling && !nearBottom)) {
                 autoFollow = false
             }
+            if (nearBottom) {
+                autoFollow = true
+            }
+            previousScrollKey = scrollKey
         }
     }
 
-    /** 起動直後〜初回最下部ジャンプ完了まで ↓FAB を出さない（瞬間表示の抑止） */
+    /** 起動直後のぴょこっと出る ↓FAB をなだめる。 */
     var suppressStartupScrollFab by remember { mutableStateOf(true) }
 
     val showScrollToBottomButton = !suppressStartupScrollFab && !isNearBottom
@@ -249,20 +236,7 @@ fun ChatScreen(
     val session = ui.activeSession()
     val messages = session?.messages.orEmpty()
 
-    /** 下端付近のみ余白キャプション（「だいたい末尾」判定に合わせ、厳密な canScrollForward には依存しない）。 */
-    val showFooterSilenceQuote by remember(
-        listState,
-        nearBottomThresholdPx,
-        messages.size,
-        ui.streamingAssistant,
-    ) {
-        derivedStateOf {
-            (messages.isNotEmpty() || ui.streamingAssistant != null) &&
-                listState.lazyListIsNearBottom(nearBottomThresholdPx)
-        }
-    }
-
-    // --- 起動／会話切替時に一発だけ最下部へ（instant anchor のみ） ---
+    // 会話を開いたら、まず栞を末尾へそっと置く。
     LaunchedEffect(session?.id, ui.loading) {
         if (ui.loading) {
             suppressStartupScrollFab = true
@@ -284,7 +258,7 @@ fun ChatScreen(
         }
     }
 
-    // --- ユーザー送信などで確定が増え末尾が user のとき一覧末尾へ ---
+    // 送信直後だけは、返事待ちの席まで案内する。
     LaunchedEffect(session?.id) {
         val sid = session?.id ?: return@LaunchedEffect
         var prevCount = session.messages.size
@@ -306,17 +280,13 @@ fun ChatScreen(
         }
     }
 
-    // --- ストリーミング中の自動追従（smooth / scrollBy は使わず anchor のみ instant） ---
+    // 下を見ている間だけ、伸びる返事に静かについていく。
     LaunchedEffect(session?.id, ui.streamingAssistant?.length, autoFollow) {
         if (!autoFollow) return@LaunchedEffect
         listState.scrollChatToBottomAnchor()
     }
 
-    val silenceQuoteFont = remember {
-        FontFamily(Font(R.font.great_vibes, FontWeight.Normal, FontStyle.Normal))
-    }
-
-    /** プリセットパネル表示中は入力欄のキーボードを閉じる */
+    /** プリセットを選ぶ時は、キーボードに少し席を外してもらう。 */
     LaunchedEffect(ui.presetPanelOpen) {
         if (ui.presetPanelOpen) {
             keyboard?.hide()
@@ -373,32 +343,18 @@ fun ChatScreen(
 
     messageEditTarget?.let { (idx, _) ->
         val sid = session?.id
-        AlertDialog(
-            onDismissRequest = { messageEditTarget = null },
-            title = { Text("メッセージを編集") },
-            text = {
-                TextField(
-                    value = messageEditDraft,
-                    onValueChange = { messageEditDraft = it },
-                    minLines = 3,
-                    maxLines = 12,
-                    modifier = Modifier.fillMaxWidth(),
-                )
+        FullScreenMessageEditDialog(
+            value = messageEditDraft,
+            onValueChange = { messageEditDraft = it },
+            onDismiss = { messageEditTarget = null },
+            onSave = {
+                if (sid != null) {
+                    vm.updateMessageText(sid, idx, messageEditDraft)
+                    messageEditTarget = null
+                }
             },
-            confirmButton = {
-                TextButton(
-                    enabled = sid != null,
-                    onClick = {
-                        if (sid != null) {
-                            vm.updateMessageText(sid, idx, messageEditDraft)
-                            messageEditTarget = null
-                        }
-                    },
-                ) { Text("保存") }
-            },
-            dismissButton = {
-                TextButton(onClick = { messageEditTarget = null }) { Text("キャンセル") }
-            },
+            saveEnabled = sid != null,
+            isDark = isDark,
         )
     }
 
@@ -536,7 +492,7 @@ fun ChatScreen(
         ) {
             Box(Modifier.fillMaxSize()) {
                 Column(Modifier.fillMaxSize()) {
-                    // --- Web: header ---
+                    // 画面上部のいつもの顔。
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -575,7 +531,7 @@ fun ChatScreen(
                         color = headerDivider,
                     )
 
-                    // --- Web: preset toggle row ---
+                    // プリセットをひらく小さな取っ手。
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -593,7 +549,7 @@ fun ChatScreen(
                         color = headerDivider,
                     )
 
-                    // --- main chat ---
+                    // 会話の本棚。
                     Box(
                         modifier = Modifier
                             .weight(1f)
@@ -613,14 +569,13 @@ fun ChatScreen(
                                     LazyColumn(
                                         state = listState,
                                         modifier = Modifier.fillMaxSize(),
-                                        flingBehavior = chatListHeavyFling,
                                         contentPadding = PaddingValues(
                                             start = 16.dp,
                                             end = 16.dp,
                                             top = 16.dp,
-                                            bottom = listBottomComposerInset,
+                                            bottom = 0.dp,
                                         ),
-                                        verticalArrangement = Arrangement.spacedBy(32.dp),
+                                        verticalArrangement = Arrangement.spacedBy(0.dp),
                                     ) {
                                         if (messages.isEmpty() && ui.streamingAssistant == null) {
                                             item {
@@ -638,12 +593,11 @@ fun ChatScreen(
                                                 "${session?.id ?: "none"}#$index"
                                             },
                                         ) { index, msg ->
-                                            val marginBottomIllusion =
-                                                if (index == messages.lastIndex && ui.streamingAssistant == null) {
-                                                    chatTailBottomMarginIllusionDp
-                                                } else {
-                                                    0.dp
-                                                }
+                                            val itemBottomGap = if (index == messages.lastIndex && ui.streamingAssistant == null) {
+                                                0.dp
+                                            } else {
+                                                chatMessageGapDp
+                                            }
                                             ChatWebBubble(
                                                 msg = msg,
                                                 session = session,
@@ -660,7 +614,7 @@ fun ChatScreen(
                                                 } else {
                                                     null
                                                 },
-                                                modifier = Modifier.padding(bottom = marginBottomIllusion),
+                                                modifier = Modifier.padding(bottom = itemBottomGap),
                                             )
                                         }
                                         if (ui.streamingAssistant != null) {
@@ -668,50 +622,17 @@ fun ChatScreen(
                                                 StreamingAiBubble(
                                                     text = ui.streamingAssistant ?: "",
                                                     isDark = isDark,
-                                                    modifier = Modifier.padding(
-                                                        bottom = chatTailBottomMarginIllusionDp,
-                                                    ),
+                                                    modifier = Modifier.padding(bottom = 0.dp),
                                                 )
                                             }
                                         }
-                                        /** streaming が伸びても index が動かない末尾 sentinel → 追従は常にこれへ instant [scrollToItem] のみ。 */
                                         item(key = "${session?.id ?: "none"}#bottom_anchor") {
                                             Spacer(
                                                 Modifier
                                                     .fillMaxWidth()
-                                                    .height(1.dp),
+                                                    .height(listBottomComposerInset),
                                             )
                                         }
-                                    }
-                                }
-
-                                if (showFooterSilenceQuote) {
-                                    val quoteBandHeight = composerMeasuredDp + 54.dp
-                                    Box(
-                                        Modifier
-                                            .align(Alignment.BottomCenter)
-                                            .fillMaxWidth()
-                                            .height(quoteBandHeight),
-                                    ) {
-                                        Text(
-                                            text = "Le silence est aussi un choix.",
-                                            fontFamily = silenceQuoteFont,
-                                            fontSize = 17.sp,
-                                            lineHeight = 22.sp,
-                                            letterSpacing = 0.12.sp,
-                                            textAlign = TextAlign.Center,
-                                            color = if (isDark) {
-                                                CodexWebPalette.slate400.copy(alpha = 0.88f)
-                                            } else {
-                                                CodexWebPalette.brownSoft.copy(alpha = 0.92f)
-                                            },
-                                            maxLines = 2,
-                                            overflow = TextOverflow.Ellipsis,
-                                            modifier = Modifier
-                                                .align(Alignment.Center)
-                                                .fillMaxWidth()
-                                                .padding(horizontal = 16.dp),
-                                        )
                                     }
                                 }
                             }
@@ -724,9 +645,8 @@ fun ChatScreen(
                                 .onSizeChanged { composerHeightPx = it.height }
                                 .background(footerBg)
                                 .border(1.dp, CodexWebPalette.footerBorder)
-                                .navigationBarsPadding()
                                 .imePadding()
-                                .padding(16.dp),
+                                .padding(horizontal = 12.dp, vertical = 6.dp),
                         ) {
                             Text(
                                 text = ui.driveStatus,
@@ -791,9 +711,9 @@ fun ChatScreen(
                                             .fillMaxWidth()
                                             .align(Alignment.BottomStart)
                                             .padding(start = 48.dp, end = 56.dp)
-                                            .heightIn(min = 44.dp, max = 140.dp),
+                                            .heightIn(min = 44.dp, max = 280.dp),
                                         placeholder = { Text("問いを刻む") },
-                                        maxLines = 6,
+                                        maxLines = 12,
                                         colors = TextFieldDefaults.colors(
                                             focusedContainerColor = Color.Transparent,
                                             unfocusedContainerColor = Color.Transparent,
@@ -893,7 +813,7 @@ fun ChatScreen(
                     }
                 }
 
-                // --- 左スライドプリセット（Web: system-preset-panel）---
+                // 左から出てくるプリセット棚。
                 AnimatedVisibility(
                     visible = ui.presetPanelOpen,
                     enter = fadeIn() + slideInHorizontally { -it },
@@ -1472,6 +1392,76 @@ private fun decodeBase64Image(dataUrl: String?): android.graphics.Bitmap? {
 }
 
 @Composable
+private fun FullScreenMessageEditDialog(
+    value: String,
+    onValueChange: (String) -> Unit,
+    onDismiss: () -> Unit,
+    onSave: () -> Unit,
+    saveEnabled: Boolean,
+    isDark: Boolean,
+) {
+    Dialog(onDismissRequest = onDismiss) {
+        Surface(
+            modifier = Modifier
+                .fillMaxSize()
+                .statusBarsPadding()
+                .imePadding(),
+            color = if (isDark) CodexWebPalette.slate900 else CodexWebPalette.chatAreaLight,
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(16.dp),
+            ) {
+                Text(
+                    "メッセージ編集",
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.Bold,
+                    color = if (isDark) CodexWebPalette.slate50 else CodexWebPalette.brownTitle,
+                    modifier = Modifier.padding(bottom = 12.dp),
+                )
+                TextField(
+                    value = value,
+                    onValueChange = onValueChange,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f),
+                    minLines = 12,
+                    colors = TextFieldDefaults.colors(
+                        focusedContainerColor = if (isDark) CodexWebPalette.slate800 else CodexWebPalette.composerCapsuleLight,
+                        unfocusedContainerColor = if (isDark) CodexWebPalette.slate800 else CodexWebPalette.composerCapsuleLight,
+                        focusedIndicatorColor = Color.Transparent,
+                        unfocusedIndicatorColor = Color.Transparent,
+                    ),
+                )
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 12.dp),
+                    horizontalArrangement = Arrangement.End,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    TextButton(onClick = onDismiss) {
+                        Text("確定せずに閉じる")
+                    }
+                    Spacer(Modifier.width(8.dp))
+                    Button(
+                        enabled = saveEnabled,
+                        onClick = onSave,
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = CodexWebPalette.sendFabSurface(isDark),
+                            contentColor = CodexWebPalette.sendFabGlyph(isDark),
+                        ),
+                    ) {
+                        Text("確定")
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun StreamingAiBubble(
     text: String,
     isDark: Boolean,
@@ -1744,47 +1734,26 @@ private fun PersonaTabPill(
 }
 
 
-/** 末尾付近: `gap = viewportEnd - lastVisible.bottom` が `>= -threshold`（緩め。padding 単体露出前で止まっている感を出す）。 */
-private fun LazyListState.lazyListIsNearBottom(thresholdPx: Float): Boolean {
-    val lastVisible = layoutInfo.visibleItemsInfo.lastOrNull() ?: return true
-    val viewportBottom = layoutInfo.viewportEndOffset
-    val distance = viewportBottom - (lastVisible.offset + lastVisible.size)
+private fun LazyListState.isBottomAnchorNearVisibleEnd(thresholdPx: Float): Boolean {
+    val info = layoutInfo
+    val anchorIndex = info.totalItemsCount - 1
+    if (anchorIndex < 0) return true
+
+    val anchor = info.visibleItemsInfo.firstOrNull { it.index == anchorIndex }
+        ?: return false
+
+    val distance = info.viewportEndOffset - (anchor.offset + anchor.size)
     return distance >= -thresholdPx
 }
 
-/**
- * 末尾 sentinel（[#bottom_anchor]）へだけ instant ジャンプ。smooth / gap 補正の [scroll] ブロックは使わず競合・ガクつきを抑える。
- */
 private suspend fun LazyListState.scrollChatToBottomAnchor() {
     val last = layoutInfo.totalItemsCount - 1
     if (last < 0) return
     scrollToItem(last)
 }
 
-/**
- * フラングをやや弱める（velocity スケール＋やや強めの exponential decay）。
- * padding 帯への惰性的到達を減らし、オーバースクロールとの相性も少しマシにする。
- */
-@Composable
-private fun rememberHeavierLazyChatFlingBehavior(): FlingBehavior {
-    return remember {
-        val decaySpec = exponentialDecay<Float>(frictionMultiplier = 1.28f)
-        object : FlingBehavior {
-            override suspend fun ScrollScope.performFling(initialVelocity: Float): Float {
-                val scaled = initialVelocity * 0.62f
-                if (kotlin.math.abs(scaled) < 1e-3f) return 0f
-                val anim = Animatable(0f)
-                var prevPx = 0f
-                anim.animateDecay(scaled, decaySpec) {
-                    val d = value - prevPx
-                    prevPx = value
-                    scrollBy(d)
-                }
-                return anim.velocity
-            }
-        }
-    }
-}
+private fun LazyListState.scrollPositionKey(): Int =
+    firstVisibleItemIndex * 1_000_000 + firstVisibleItemScrollOffset
 
 /**
  * snapshotFlow 用: 会話 [sid] の確定メッセージ件数と、末尾が user か。

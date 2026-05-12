@@ -16,7 +16,7 @@ import kotlinx.serialization.json.jsonPrimitive
 import java.io.File
 
 /**
- * Web版 main.js の会話JSON抽出（世界設定ごと）を Kotlin で再現。
+ * 会話JSONから世界設定ごとの束を取り出す仕分け台。
  */
 object ConversationWorldExtract {
 

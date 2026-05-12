@@ -21,7 +21,7 @@ import java.util.concurrent.TimeUnit
 import kotlin.coroutines.cancellation.CancellationException
 
 /**
- * Web版 [assets/js/providers.js] の `callGeminiAPI` に相当（ストリーム優先、失敗時は非ストリームへフォールバック）
+ * Gemini の窓口。まずは流れる返事を試し、詰まったら一括返答にそっと切り替える。
  */
 class GeminiClient(
     private val client: OkHttpClient = defaultClient,
@@ -37,6 +37,7 @@ class GeminiClient(
         maxTokens: Int?,
         allowSearch: Boolean,
         onChunk: (delta: String, accumulated: String) -> Unit,
+        onFallback: ((String) -> Unit)? = null,
     ): String = withContext(Dispatchers.IO) {
         val body = buildRequestBody(
             messages = messages,
@@ -60,11 +61,13 @@ class GeminiClient(
             throw e
         } catch (e: ApiFailureReport) {
             if (e.detailLines.firstOrNull()?.startsWith("HTTP") == true) {
+                onFallback?.invoke("stream HTTP failure")
                 nonStream(nonStreamUrl, body)
             } else {
                 throw e
             }
         } catch (e: Exception) {
+            onFallback?.invoke(e::class.simpleName ?: "stream exception")
             nonStream(nonStreamUrl, body)
         }
     }
@@ -119,7 +122,7 @@ class GeminiClient(
     }
 
     /**
-     * Web版 `normalizeGeminiContents` の移植（テキスト＋画像インライン／ファイル名メタ）
+     * Gemini に渡す荷物を整える。本文、画像、ファイル名メモをひとまとめにする。
      */
     private fun normalizeGeminiContents(messages: List<ChatMessage>): JsonArray {
         data class Entry(val role: String, val parts: MutableList<JsonObject>)

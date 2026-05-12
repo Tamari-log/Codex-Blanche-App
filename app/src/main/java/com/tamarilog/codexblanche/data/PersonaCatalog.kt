@@ -5,7 +5,7 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 
 /**
- * Web版 [assets/js/persona.js] の SYSTEM_PERSONAS
+ * 最初から棚に並んでいるプリセットたち。
  */
 object PersonaCatalog {
     val systemPersonas: List<Persona> = listOf(

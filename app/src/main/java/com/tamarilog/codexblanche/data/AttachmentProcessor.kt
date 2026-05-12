@@ -12,7 +12,7 @@ import org.apache.poi.xwpf.usermodel.XWPFDocument
 import java.util.Locale
 
 /**
- * Web版 main.js のファイル添付・テキスト抽出ロジックに相当
+ * 添付ファイルの荷ほどき係。読めるものは読み、重すぎる荷物はほどよく畳む。
  */
 object AttachmentProcessor {
     const val MAX_SHARED_FILES = 10

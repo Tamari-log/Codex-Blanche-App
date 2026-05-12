@@ -72,6 +72,9 @@ import com.tamarilog.codexblanche.data.model.ModelOptions
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import kotlin.math.roundToInt
 
 private enum class SettingsDest(val id: String) {
@@ -352,7 +355,7 @@ fun SettingsScreen(
 
                 SettingsDest.AdvancedRoot -> SettingsAdvancedRoot(isDark = isDark) { stack.add(it) }
 
-                SettingsDest.DevRoot -> SettingsDevRoot(isDark = isDark) { stack.add(it) }
+                SettingsDest.DevRoot -> SettingsDevRoot(isDark = isDark, logs = ui.devLogs) { stack.add(it) }
 
                 SettingsDest.DevLogs -> SettingsDevLogs(
                     isDark = isDark,
@@ -981,8 +984,36 @@ private fun SettingsAdvancedRoot(
 @Composable
 private fun SettingsDevRoot(
     isDark: Boolean,
+    logs: List<com.tamarilog.codexblanche.DevLogEntry>,
     onOpen: (SettingsDest) -> Unit,
 ) {
+    SettingsSectionTitle(isDark, "開発者ダッシュボード")
+    val latest = logs.lastOrNull()
+    val aiLogs = logs.filter { it.text.startsWith("AI ") }.takeLast(4).asReversed()
+    Text(
+        "ログ件数: ${logs.size} / 最新: ${latest?.let { "[${it.level}] ${it.text}" } ?: "なし"}",
+        style = MaterialTheme.typography.bodySmall,
+        color = if (isDark) SettingsUi.hintDark else SettingsUi.hint,
+    )
+    if (aiLogs.isNotEmpty()) {
+        Column(
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+            modifier = Modifier.padding(top = 8.dp, bottom = 8.dp),
+        ) {
+            Text(
+                "AI計測ログ",
+                fontWeight = FontWeight.Bold,
+                color = if (isDark) SettingsUi.navTextDark else SettingsUi.navTextLight,
+            )
+            aiLogs.forEach { e ->
+                Text(
+                    "${formatDevLogTime(e.at)} [${e.level}] ${e.text}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (isDark) SettingsUi.navTextDark else SettingsUi.navTextLight,
+                )
+            }
+        }
+    }
     SettingsNavRow(isDark, primary = true, onClick = { onOpen(SettingsDest.DevLogs) }) {
         Text("ログ", fontWeight = FontWeight.Bold)
     }
@@ -1006,10 +1037,25 @@ private fun SettingsDevLogs(
         style = MaterialTheme.typography.bodySmall,
         color = if (isDark) SettingsUi.hintDark else SettingsUi.hint,
     )
+    val aiLogs = logs.filter { it.text.startsWith("AI ") }.asReversed()
+    if (aiLogs.isNotEmpty()) {
+        SettingsSectionTitle(isDark, "AI応答計測")
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            for (e in aiLogs.take(8)) {
+                Text(
+                    "${formatDevLogTime(e.at)} [${e.level}] ${e.text}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (isDark) SettingsUi.navTextDark else SettingsUi.navTextLight,
+                )
+            }
+        }
+        HorizontalDivider(color = if (isDark) SettingsUi.navBorderDark else SettingsUi.navBorderLight)
+    }
+    SettingsSectionTitle(isDark, "全ログ")
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         for (e in logs.asReversed()) {
             Text(
-                "[${e.level}] ${e.text}",
+                "${formatDevLogTime(e.at)} [${e.level}] ${e.text}",
                 style = MaterialTheme.typography.bodySmall,
                 color = if (isDark) SettingsUi.navTextDark else SettingsUi.navTextLight,
             )
@@ -1022,6 +1068,9 @@ private fun SettingsDevLogs(
         shape = RoundedCornerShape(10.dp),
     ) { Text("新規会話を開始", fontWeight = FontWeight.Bold) }
 }
+
+private fun formatDevLogTime(at: Long): String =
+    SimpleDateFormat("HH:mm:ss", Locale.JAPAN).format(Date(at))
 
 @Composable
 private fun SettingsDevConvExport(

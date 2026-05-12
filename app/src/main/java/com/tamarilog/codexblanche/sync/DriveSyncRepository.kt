@@ -26,7 +26,7 @@ import java.io.ByteArrayOutputStream
 import java.util.Collections
 
 /**
- * Web版 [assets/js/sync.js] の Drive 同期に相当
+ * Google Drive との連絡係。ローカルの記録をなくさないよう、静かに受け渡す。
  */
 class DriveSyncRepository(private val context: Context) {
 

@@ -11,7 +11,7 @@ fun normalizeThinkingLevel(value: String?, fallback: String = "medium"): String 
 }
 
 /**
- * Web版 `getEffectiveSettings()` と同じ優先順位（会話オーバーライド → グローバル設定）
+ * 会話ごとの指定を先に見て、空欄なら全体設定に戻る。設定の席順係。
  */
 fun resolveEffectiveSettings(session: ChatSession?, global: AppSettings): EffectiveAiSettings {
     val o = session?.overrides

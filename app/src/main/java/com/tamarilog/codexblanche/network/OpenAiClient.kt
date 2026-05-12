@@ -15,11 +15,13 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import java.io.IOException
 import java.util.concurrent.TimeUnit
 import java.util.regex.Pattern
+import kotlin.coroutines.cancellation.CancellationException
 
 /**
- * Web版 [assets/js/providers.js] の `callOpenAIAPI`（/v1/responses）に相当。現状は非ストリーミング。
+ * OpenAI への窓口。流れる返事を受け取り、必要なら一括返答へ安全に降りる。
  */
 class OpenAiClient(
     private val client: OkHttpClient = defaultClient,
@@ -76,6 +78,115 @@ class OpenAiClient(
         }
     }
 
+    suspend fun completeStreaming(
+        messages: List<ChatMessage>,
+        apiKey: String,
+        model: String,
+        instructions: String?,
+        allowSearch: Boolean,
+        thinkingLevel: String,
+        temperature: Double?,
+        maxTokens: Int?,
+        onChunk: (delta: String, accumulated: String) -> Unit,
+        onFallback: ((String) -> Unit)? = null,
+    ): String = withContext(Dispatchers.IO) {
+        val input = buildInputArray(messages)
+        val supportsReasoning = Pattern.compile("^gpt-5", Pattern.CASE_INSENSITIVE).matcher(model).find()
+        val effort = thinkingLevel.lowercase().let { if (it in setOf("low", "medium", "high")) it else "medium" }
+
+        val body = buildJsonObject {
+            put("model", model)
+            put("input", input)
+            put("stream", true)
+            instructions?.trim()?.takeIf { it.isNotEmpty() }?.let { put("instructions", it) }
+            if (allowSearch) {
+                put(
+                    "tools",
+                    buildJsonArray { add(buildJsonObject { put("type", "web_search_preview") }) },
+                )
+            }
+            if (supportsReasoning) {
+                put("reasoning", buildJsonObject { put("effort", effort) })
+            }
+            temperature?.let { put("temperature", it) }
+            maxTokens?.let { put("max_output_tokens", it) }
+        }
+
+        val request = Request.Builder()
+            .url("https://api.openai.com/v1/responses")
+            .header("Authorization", "Bearer $apiKey")
+            .header("Content-Type", "application/json")
+            .header("Accept", "text/event-stream")
+            .post(body.toString().toRequestBody(JSON_MEDIA))
+            .build()
+
+        try {
+            streamResponses(request, onChunk)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            onFallback?.invoke(e::class.simpleName ?: "stream exception")
+            complete(
+                messages = messages,
+                apiKey = apiKey,
+                model = model,
+                instructions = instructions,
+                allowSearch = allowSearch,
+                thinkingLevel = thinkingLevel,
+                temperature = temperature,
+                maxTokens = maxTokens,
+            )
+        }
+    }
+
+    private fun streamResponses(
+        request: Request,
+        onChunk: (delta: String, accumulated: String) -> Unit,
+    ): String {
+        return client.newCall(request).execute().use { response ->
+            if (!response.isSuccessful) {
+                val raw = response.body?.string().orEmpty()
+                throw ApiFailureReport.openAi(response.code, raw)
+            }
+            val source = response.body?.source() ?: throw IOException("OpenAI response body was empty.")
+            val pendingEventDataLines = mutableListOf<String>()
+            val sb = StringBuilder()
+
+            fun flushPending() {
+                if (pendingEventDataLines.isEmpty()) return
+                val raw = pendingEventDataLines.joinToString("\n")
+                pendingEventDataLines.clear()
+                if (raw == "[DONE]") return
+                val obj = runCatching { json.parseToJsonElement(raw).jsonObject }.getOrNull()
+                    ?: return
+                val type = obj["type"]?.jsonPrimitive?.content.orEmpty()
+                if (type == "error") {
+                    throw ApiFailureReport.openAi(400, raw)
+                }
+                val delta = when (type) {
+                    "response.output_text.delta" -> obj["delta"]?.jsonPrimitive?.content.orEmpty()
+                    "response.refusal.delta" -> obj["delta"]?.jsonPrimitive?.content.orEmpty()
+                    else -> ""
+                }
+                if (delta.isEmpty()) return
+                sb.append(delta)
+                onChunk(delta, sb.toString())
+            }
+
+            while (!source.exhausted()) {
+                val line = source.readUtf8Line() ?: break
+                if (line.isBlank()) {
+                    flushPending()
+                    continue
+                }
+                if (!line.startsWith("data:")) continue
+                pendingEventDataLines.add(line.removePrefix("data:").trimStart())
+            }
+            flushPending()
+            sb.toString().ifBlank { "応答を取得できませんでした。" }
+        }
+    }
+
     private fun extractOutputTextFallback(root: JsonObject): String? {
         val output = root["output"]?.jsonArray ?: return null
         val sb = StringBuilder()
@@ -120,7 +231,7 @@ class OpenAiClient(
             var text = msg.text.trim()
             if (fileLines.isNotEmpty()) {
                 val fileBlock = buildString {
-                    appendLine("[添付ファイル（ファイル内容は送信されず名前のみ）]")
+                    appendLine("[Attached files: only file names are sent]")
                     fileLines.forEach { appendLine(it) }
                 }.trimEnd()
                 text = if (text.isNotEmpty()) "$text\n\n$fileBlock" else fileBlock

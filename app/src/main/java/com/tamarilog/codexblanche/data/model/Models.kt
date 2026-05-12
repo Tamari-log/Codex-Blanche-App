@@ -57,7 +57,7 @@ data class Persona(
     val id: String = "",
     val name: String,
     val pinned: Boolean = false,
-    /** Web版と同様、プリセットごとの設定を柔軟に保持 */
+    /** プリセットごとの気分や癖を、少し余白を持って預かる。 */
     val settings: JsonObject = JsonObject(emptyMap()),
 )
 
@@ -92,7 +92,7 @@ data class AppSettings(
     val driveFileName: String = "codex_data.json",
     val geminiApiKey: String = "",
     val openaiApiKey: String = "",
-    /** "dark" | "light" | "" (空=システムに従う) Web版 localStorage.theme に相当 */
+    /** "dark" | "light" | ""。空なら端末の気分に合わせる。 */
     val theme: String = "",
 )
 
@@ -109,7 +109,7 @@ enum class AiProvider(val id: String) {
     OpenAI("openai"),
 }
 
-/** Web版 settings.js CONTEXT_LIMITS と同じ上限 */
+/** 文脈を詰め込みすぎないための、荷物棚の上限。 */
 object ContextLimits {
     const val GEMINI = 15000
     const val OPENAI = 5000

@@ -66,7 +66,7 @@ data class ChatUiState(
     val streamingAssistant: String? = null,
     val error: String? = null,
     val sending: Boolean = false,
-    /** プリセットパネル（Webの system preset panel） */
+    /** プリセット棚。開け閉めされる、設定たちの小部屋。 */
     val presetPanelOpen: Boolean = false,
     val historySearchQuery: String = "",
     val pendingImages: List<PendingImage> = emptyList(),
@@ -75,7 +75,7 @@ data class ChatUiState(
     val driveSignedIn: Boolean = false,
     val devLogs: List<DevLogEntry> = emptyList(),
     val importConfirmMessage: String? = null,
-    /** Web state.ui.activePersonaId — カスタムプリセットの選択ハイライト */
+    /** 選ばれているプリセットに、そっと明かりを当てる。 */
     val activePersonaId: String? = null,
 ) {
     fun activeSession(): ChatSession? {
@@ -101,10 +101,10 @@ class ChatViewModel(
 
     private var sendJob: Job? = null
     private val devLogLimit = 200
-    /** 手動 Pull/Push と自動アップロードがぶつからないよう逐次化 */
+    /** 手動同期と自動同期が廊下でぶつからないよう、一列に並べる。 */
     private val driveSyncMutex = Mutex()
 
-    /** 接続時のみ Drive をローカルスナップショットで上書き。未接続は黙ってスキップ（自動同期用）。 */
+    /** Drive接続時だけ同期する。未接続なら、何もなかった顔で通す。 */
     private fun scheduleDriveAutoPush() {
         viewModelScope.launch {
             driveSyncMutex.withLock {
@@ -721,16 +721,11 @@ class ChatViewModel(
             val renderSpeed = eff.renderSpeed.ifBlank { "normal" }
             val reply = when (eff.provider) {
                 "openai" -> {
-                    _ui.update { it.copy(streamingAssistant = "") }
-                    openAi.complete(
-                        messages = apiMessages,
-                        apiKey = apiKey,
-                        model = eff.openaiModel,
-                        instructions = eff.systemPrompt.ifBlank { null },
-                        allowSearch = eff.allowOpenaiSearch,
-                        thinkingLevel = eff.thinkingLevel,
-                        temperature = eff.temperature,
-                        maxTokens = eff.maxTokens,
+                    streamOpenAiWithSpeed(
+                        apiMessages,
+                        apiKey,
+                        eff,
+                        renderSpeed,
                     )
                 }
                 else -> {
@@ -788,6 +783,53 @@ class ChatViewModel(
         eff: EffectiveAiSettings,
         renderSpeed: String,
     ): String = coroutineScope {
+        val label = "Gemini ${eff.geminiModel}"
+        renderStreamingText(label, renderSpeed) { onChunk ->
+            gemini.generate(
+                messages = messages,
+                apiKey = apiKey,
+                model = eff.geminiModel,
+                systemInstruction = eff.systemPrompt.ifBlank { null },
+                temperature = eff.temperature,
+                maxTokens = eff.maxTokens,
+                allowSearch = eff.allowGeminiSearch,
+                onChunk = { _, full -> onChunk(full) },
+                onFallback = { reason -> log("WARN", "AI streaming fallback: $label -> non-stream ($reason)") },
+            )
+        }
+    }
+
+    private suspend fun streamOpenAiWithSpeed(
+        messages: List<ChatMessage>,
+        apiKey: String,
+        eff: EffectiveAiSettings,
+        renderSpeed: String,
+    ): String = coroutineScope {
+        val label = "OpenAI ${eff.openaiModel}"
+        renderStreamingText(label, renderSpeed) { onChunk ->
+            openAi.completeStreaming(
+                messages = messages,
+                apiKey = apiKey,
+                model = eff.openaiModel,
+                instructions = eff.systemPrompt.ifBlank { null },
+                allowSearch = eff.allowOpenaiSearch,
+                thinkingLevel = eff.thinkingLevel,
+                temperature = eff.temperature,
+                maxTokens = eff.maxTokens,
+                onChunk = { _, full -> onChunk(full) },
+                onFallback = { reason -> log("WARN", "AI streaming fallback: $label -> non-stream ($reason)") },
+            )
+        }
+    }
+
+    private suspend fun renderStreamingText(
+        label: String,
+        renderSpeed: String,
+        request: suspend ((String) -> Unit) -> String,
+    ): String = coroutineScope {
+        val startedAt = System.currentTimeMillis()
+        var firstChunkLogged = false
+        log("INFO", "AI request start: $label / render=$renderSpeed")
         val charDelayMs = charRevealDelayMs(renderSpeed)
         val inbox = Channel<String>(Channel.CONFLATED)
         val renderJob = launch(Dispatchers.Main.immediate) {
@@ -816,19 +858,21 @@ class ChatViewModel(
             }
         }
         val reply = try {
-            gemini.generate(
-                messages = messages,
-                apiKey = apiKey,
-                model = eff.geminiModel,
-                systemInstruction = eff.systemPrompt.ifBlank { null },
-                temperature = eff.temperature,
-                maxTokens = eff.maxTokens,
-                allowSearch = eff.allowGeminiSearch,
-                onChunk = { _, full -> inbox.trySend(full) },
-            )
+            request { full ->
+                if (!firstChunkLogged && full.isNotEmpty()) {
+                    firstChunkLogged = true
+                    val elapsedMs = System.currentTimeMillis() - startedAt
+                    log("INFO", "AI first chunk: $label in ${elapsedMs}ms (${full.length} chars accumulated)")
+                }
+                inbox.trySend(full)
+            }
         } finally {
             inbox.close()
             renderJob.join()
+        }
+        if (!firstChunkLogged) {
+            val elapsedMs = System.currentTimeMillis() - startedAt
+            log("WARN", "AI no streaming chunks: $label completed in ${elapsedMs}ms")
         }
         reply
     }
@@ -955,7 +999,7 @@ class ChatViewModel(
             val hasData = DriveSyncRepository.hasSyncData(snap.sessions, snap.personas)
             if (hasData) deletedAt = 0L
             if (!hasData && deletedAt == 0L) {
-                // tombstone handled like web
+                // 削除済み印は、同期の迷子札として扱う。
             }
             repo.setDeletedAt(if (hasData) 0L else deletedAt)
             deletedAt = repo.getDeletedAt()

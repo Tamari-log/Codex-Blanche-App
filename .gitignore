@@ -11,3 +11,22 @@
 *.apk
 *.aab
 *.keystore
+
+# Local-only secrets and machine crumbs. Keep the pockets turned out before pushing.
+.env
+.env.*
+!.env.example
+*.jks
+*.p12
+*.pem
+*.key
+secrets.properties
+apikey.properties
+google-services.local.json
+
+# Generated/debug artifacts that may contain local paths, logs, or exported chats.
+docs/*combined-sources*.txt
+*.log
+exports/
+backups/
+local-data/

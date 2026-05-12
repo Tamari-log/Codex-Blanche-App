@@ -14,8 +14,7 @@ import coil.request.ImageRequest
 import com.tamarilog.codexblanche.ui.theme.CodexWebTextures
 
 /**
- * Web の chat-bg 相当：ベース色の上に羊皮紙 / ダークマターのテクスチャを重ねる。
- *（multiply の近似としてアルファブレンド）
+ * 背景に紙の手触りを一枚重ねる。光も闇も、少しだけ写本らしく。
  */
 @Composable
 fun ChatPaperBackdrop(

@@ -101,7 +101,7 @@ object ChatImportExport {
     }
 }
 
-/** Web版 main.js buildApiMessages */
+/** AI に渡す会話を、持ち運びやすい形に整える梱包台。 */
 object ApiMessages {
     private const val MAX_API_ATTACHMENT_MESSAGES = 3
     private const val MAX_API_IMAGE_ATTACHMENTS = 6

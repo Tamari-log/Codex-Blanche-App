@@ -1,7 +1,7 @@
 package com.tamarilog.codexblanche.data
 
 /**
- * Web版 [assets/js/settings.js] の STORAGE_KEYS と同名（将来データ移行しやすくするため）
+ * 保存場所の名札。将来の引っ越しでも迷子になりにくいように揃えておく。
  */
 object StorageKeys {
     const val sessions = "codex_sessions"

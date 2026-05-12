@@ -789,9 +789,10 @@ class ChatViewModel(
         renderSpeed: String,
     ): String = coroutineScope {
         val charDelayMs = charRevealDelayMs(renderSpeed)
-        val inbox = Channel<String>(Channel.UNLIMITED)
+        val inbox = Channel<String>(Channel.CONFLATED)
         val renderJob = launch(Dispatchers.Main.immediate) {
             var renderedUi = ""
+            var lastStreamingEmitMs = 0L
             for (full in inbox) {
                 val newChars = when {
                     full.startsWith(renderedUi) -> full.drop(renderedUi.length)
@@ -804,9 +805,14 @@ class ChatViewModel(
                 if (newChars.isEmpty()) continue
                 for (ch in newChars) {
                     renderedUi += ch
-                    _ui.update { it.copy(streamingAssistant = renderedUi) }
+                    val now = System.currentTimeMillis()
+                    if (now - lastStreamingEmitMs >= 64L) {
+                        lastStreamingEmitMs = now
+                        _ui.update { it.copy(streamingAssistant = renderedUi) }
+                    }
                     if (charDelayMs > 0) delay(charDelayMs)
                 }
+                _ui.update { it.copy(streamingAssistant = renderedUi) }
             }
         }
         val reply = try {
@@ -832,11 +838,17 @@ class ChatViewModel(
         val waitMs = charRevealDelayMs(renderSpeed)
         var rendered = _ui.value.streamingAssistant.orEmpty()
         if (!text.startsWith(rendered)) rendered = ""
+        var lastRevealEmitMs = 0L
         for (ch in text.drop(rendered.length)) {
             rendered += ch
-            _ui.update { it.copy(streamingAssistant = rendered) }
+            val now = System.currentTimeMillis()
+            if (now - lastRevealEmitMs >= 64L) {
+                lastRevealEmitMs = now
+                _ui.update { it.copy(streamingAssistant = rendered) }
+            }
             if (waitMs > 0) delay(waitMs)
         }
+        _ui.update { it.copy(streamingAssistant = rendered) }
         return text
     }
 
